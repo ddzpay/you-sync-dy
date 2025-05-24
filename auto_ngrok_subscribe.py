@@ -79,7 +79,7 @@ def check_ngrok_public_url():
         pass
     return False
 
-def health_check_ngrok(get_ngrok_proc, restart_callback, interval=30):
+def health_check_ngrok(get_ngrok_proc, restart_callback, interval=60):
     """
     get_ngrok_proc: 一个函数，返回当前 ngrok_proc 对象
     restart_callback: 一个函数，调用后会重启 ngrok 并返回 (ngrok_proc, public_url)
@@ -170,7 +170,7 @@ def main():
     # 启动健康检查线程
     threading.Thread(
         target=health_check_ngrok,
-        args=(get_ngrok_proc, restart_ngrok, 30),
+        args=(get_ngrok_proc, restart_ngrok, 60),
         daemon=True
     ).start()
 
