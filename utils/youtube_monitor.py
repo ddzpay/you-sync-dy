@@ -1,9 +1,9 @@
 import os
-import json
 import logging
 import re
 import aiohttp
-from datetime import datetime, timezone
+import configparser
+from datetime import datetime, timezone  
 
 class YoutubeMonitor:
     def __init__(self):
@@ -11,21 +11,22 @@ class YoutubeMonitor:
         os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
         self.checked_videos = self.load_history()
 
-        # 加载 config.json 获取 API key 和可选代理设置
-        config_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json'))
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                self.api_key = config.get('youtube_api_key', '')
-                self.proxy = config.get('proxy', None)
-                if not self.api_key:
-                    logging.error("[!] config.json 中缺少 youtube_api_key")
-        except Exception as e:
-            logging.error(f"[!] 加载 config.json 失败: {e}")
-            self.api_key = ''
+        # 加载 config.ini 获取 API key 和可选代理设置
+        config_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'conf', 'config.ini'))
+        config = configparser.ConfigParser()
+        config.read(config_path, encoding='utf-8')
+        if "global" in config:
+            self.api_key = config.get("global", "youtube_api_key", fallback="")
+            self.proxy = config.get("global", "proxy", fallback=None)
+            if not self.api_key:
+                logging.error("[!] config.ini 中缺少 youtube_api_key")
+        else:
+            logging.error("[!] config.ini 中缺少 [global] 部分")
+            self.api_key = ""
             self.proxy = None
 
     def load_history(self):
+        import json
         try:
             with open(self.history_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -33,6 +34,7 @@ class YoutubeMonitor:
             return {}
 
     def save_history(self):
+        import json
         try:
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(self.checked_videos, f, ensure_ascii=False, indent=4)
@@ -88,12 +90,3 @@ class YoutubeMonitor:
         except Exception as e:
             logging.error(f"[!] 获取视频信息失败: {e}")
         return None
-
-    def is_recent(self, publish_time_str, within_seconds=120):
-        try:
-            publish_time = datetime.strptime(publish_time_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            now = datetime.utcnow().replace(tzinfo=timezone.utc)
-            return (now - publish_time).total_seconds() <= within_seconds
-        except Exception as e:
-            logging.error(f"[!] 解析发布时间失败: {e}")
-            return False
