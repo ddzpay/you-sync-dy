@@ -5,6 +5,7 @@ import json
 import threading
 import os
 import asyncio
+import logging
 
 from subscribe import subscribe_channel, unsubscribe_channel
 from webhook_server import app, start_async_handler, set_uploader_log_handler
@@ -17,6 +18,7 @@ NGROK_PORT = 8000
 CALLBACK_PATH = "/youtube/callback"
 CONFIG_FILE = "config.json"
 SUBSCRIBED_FILE = "subscribed_channels.json"  # 用于记录上次订阅的频道
+ERROR_LOG_FILE = "subscription_error.log"      # 失败报警日志文件
 # =============================
 
 def ensure_ngrok_authtoken():
@@ -60,15 +62,28 @@ def save_subscribed_channels(channel_id_set):
     with open(SUBSCRIBED_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(list(channel_id_set)), f, indent=2, ensure_ascii=False)
 
+def alarm_on_failure(action, channel_id, callback_url):
+    # 可扩展为邮件、钉钉等
+    msg = f"[ALERT] {action} 失败: channel_id={channel_id}, callback_url={callback_url}"
+    logging.error(msg)
+    with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+
 def sync_subscriptions(callback_url):
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         config = json.load(f)
     current_channels = set(config.get("channels", []))
     previous_channels = load_previous_subscribed_channels()
+    # 订阅新频道
     for cid in current_channels - previous_channels:
-        subscribe_channel(cid, callback_url)
+        success = subscribe_channel(cid, callback_url)
+        if not success:
+            alarm_on_failure("订阅", cid, callback_url)
+    # 取消已移除频道的订阅
     for cid in previous_channels - current_channels:
-        unsubscribe_channel(cid, callback_url)
+        success = unsubscribe_channel(cid, callback_url)
+        if not success:
+            alarm_on_failure("取消订阅", cid, callback_url)
     save_subscribed_channels(current_channels)
 
 # 统一日志打印回调
@@ -76,6 +91,16 @@ def print_log(msg):
     print(msg)
 
 def main():
+    # 日志配置
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler("auto_ngrok_subscribe.log", encoding="utf-8")
+        ]
+    )
+
     ensure_ngrok_authtoken()
     ngrok_proc, public_url = start_ngrok()
     callback_url = public_url + CALLBACK_PATH
