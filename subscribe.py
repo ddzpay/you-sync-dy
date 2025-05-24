@@ -21,12 +21,17 @@ def _submit_subscription(channel_id: str, callback_url: str, mode: str, retry=3,
         try:
             resp = requests.post(hub_url, data=data, timeout=10)
             if resp.status_code == 202:
-                logging.info(f"[✓] {mode.upper()} 成功: {channel_id}")
-                return True
+                msg = f"[✓] {mode.upper()} 成功: {channel_id}"
+                print(msg)
+                return True, msg
             else:
-                logging.warning(f"[!] {mode.upper()} 失败: {resp.status_code} - {resp.text}")
+                msg = f"[!] {mode.upper()} 失败: {resp.status_code} - {resp.text}"
+                print(msg)
         except requests.exceptions.RequestException as e:
-            logging.error(f"[!] 网络异常 ({mode}, 尝试 {attempt+1}/{retry}): {e}")
+            msg = f"[!] 网络异常 ({mode}, 尝试 {attempt+1}/{retry}): {e}"
+            print(msg)
         if attempt < retry - 1:
             time.sleep(delay)
-    return False
+    msg = f"[!] {mode.upper()} 最终失败: {channel_id}"
+    print(msg)
+    return False, msg
