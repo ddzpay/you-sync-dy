@@ -12,7 +12,7 @@ class YoutubeMonitor:
         self.checked_videos = self.load_history()
 
         # 加载 config.ini 获取 API key 和可选代理设置
-        config_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'conf', 'config.ini'))
+        config_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'config.ini'))
         config = configparser.ConfigParser()
         config.read(config_path, encoding='utf-8')
         if "global" in config:
