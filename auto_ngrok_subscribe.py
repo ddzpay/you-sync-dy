@@ -67,6 +67,40 @@ def start_ngrok():
     ngrok_proc.terminate()
     exit(1)
 
+def check_ngrok_public_url():
+    try:
+        res = requests.get("http://localhost:4040/api/tunnels", timeout=2)
+        data = res.json()
+        tunnels = data.get("tunnels", [])
+        for tun in tunnels:
+            if tun.get("public_url"):
+                return True
+    except Exception:
+        pass
+    return False
+
+def health_check_ngrok(get_ngrok_proc, restart_callback, interval=30):
+    """
+    get_ngrok_proc: 一个函数，返回当前 ngrok_proc 对象
+    restart_callback: 一个函数，调用后会重启 ngrok 并返回 (ngrok_proc, public_url)
+    """
+    while True:
+        ngrok_proc = get_ngrok_proc()
+        # 1. 检查进程
+        if ngrok_proc.poll() is not None:
+            print("[!] ngrok 进程已退出，重启中...")
+            restart_callback()
+            time.sleep(3)
+            continue
+        # 2. 检查公网地址
+        if not check_ngrok_public_url():
+            print("[!] ngrok 公网地址不可用，重启中...")
+            ngrok_proc.terminate()
+            restart_callback()
+            time.sleep(3)
+            continue
+        time.sleep(interval)
+
 def load_previous_subscribed_channels():
     import json
     if os.path.exists(SUBSCRIBED_FILE):
@@ -118,9 +152,27 @@ def main():
 
     authtoken = config.get("ngrok_authtoken", "")
     ensure_ngrok_authtoken(authtoken)
+
     ngrok_proc, public_url = start_ngrok()
     callback_url = public_url + CALLBACK_PATH
     print(f"[✓] 最终 Callback URL: {callback_url}")
+
+    # 用于健康检查的闭包
+    state = {"ngrok_proc": ngrok_proc, "public_url": public_url}
+    def get_ngrok_proc():
+        return state["ngrok_proc"]
+    def restart_ngrok():
+        ngrok_proc, public_url = start_ngrok()
+        state["ngrok_proc"] = ngrok_proc
+        state["public_url"] = public_url
+        print(f"[✓] ngrok 已重启，新的 Callback URL: {public_url + CALLBACK_PATH}")
+
+    # 启动健康检查线程
+    threading.Thread(
+        target=health_check_ngrok,
+        args=(get_ngrok_proc, restart_ngrok, 30),
+        daemon=True
+    ).start()
 
     flask_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=NGROK_PORT, debug=False))
     flask_thread.daemon = True
@@ -140,7 +192,7 @@ def main():
             time.sleep(10)
     except KeyboardInterrupt:
         print("[✓] 程序被中断，关闭 ngrok...")
-        ngrok_proc.terminate()
+        state["ngrok_proc"].terminate()
 
 if __name__ == "__main__":
     main()
