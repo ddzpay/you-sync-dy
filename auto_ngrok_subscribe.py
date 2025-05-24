@@ -4,28 +4,35 @@ import requests
 import json
 import threading
 import os
-import asyncio
 import logging
 
 from subscribe import subscribe_channel, unsubscribe_channel
 from webhook_server import app, start_async_handler, set_uploader_log_handler
-from utils.douyin_uploader import DouyinUploader
 
 # ========== 配置区域 ==========
+
+CONFIG_FILE = "config.json"
+CHANNELS_FILE = "channels.json"
+SUBSCRIBED_FILE = "subscribed_channels.json"  # 用于记录上次订阅的频道  
+ERROR_LOG_FILE = "subscription_error.log"      # 失败报警日志文件
 NGROK_PATH = "ngrok.exe"
-AUTHTOKEN = "2vkOXZqlvneXRXUm8SMacHRQLMh_6N4se6VioNdCwSiCfVkFW"
 NGROK_PORT = 8000
 CALLBACK_PATH = "/youtube/callback"
-CONFIG_FILE = "config.json"
-SUBSCRIBED_FILE = "subscribed_channels.json"  # 用于记录上次订阅的频道
-ERROR_LOG_FILE = "subscription_error.log"      # 失败报警日志文件
 # =============================
 
-def ensure_ngrok_authtoken():
+def load_config():
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def load_channels():
+    with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def ensure_ngrok_authtoken(authtoken):
     config_dir = os.path.expanduser("~/.ngrok2")
     config_file = os.path.join(config_dir, "ngrok.yml")
-    if not os.path.exists(config_file) or AUTHTOKEN not in open(config_file, encoding="utf-8").read():
-        subprocess.run([NGROK_PATH, "config", "add-authtoken", AUTHTOKEN])
+    if not os.path.exists(config_file) or authtoken not in open(config_file, encoding="utf-8").read():
+        subprocess.run([NGROK_PATH, "config", "add-authtoken", authtoken])
         print("[*] ngrok authtoken 已配置")
     else:
         print("[*] ngrok authtoken 已存在，无需重复配置")
@@ -49,9 +56,6 @@ def start_ngrok():
     ngrok_proc.terminate()
     exit(1)
 
-def start_flask():
-    app.run(host="0.0.0.0", port=NGROK_PORT, debug=False)
-
 def load_previous_subscribed_channels():
     if os.path.exists(SUBSCRIBED_FILE):
         with open(SUBSCRIBED_FILE, "r", encoding="utf-8") as f:
@@ -63,35 +67,28 @@ def save_subscribed_channels(channel_id_set):
         json.dump(sorted(list(channel_id_set)), f, indent=2, ensure_ascii=False)
 
 def alarm_on_failure(action, channel_id, callback_url):
-    # 可扩展为邮件、钉钉等
     msg = f"[ALERT] {action} 失败: channel_id={channel_id}, callback_url={callback_url}"
     logging.error(msg)
     with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
-def sync_subscriptions(callback_url):
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    current_channels = set(config.get("channels", []))
+def sync_subscriptions(callback_url, channels):
     previous_channels = load_previous_subscribed_channels()
-    # 订阅新频道
+    current_channels = set(channels)
     for cid in current_channels - previous_channels:
         success = subscribe_channel(cid, callback_url)
         if not success:
             alarm_on_failure("订阅", cid, callback_url)
-    # 取消已移除频道的订阅
     for cid in previous_channels - current_channels:
         success = unsubscribe_channel(cid, callback_url)
         if not success:
             alarm_on_failure("取消订阅", cid, callback_url)
     save_subscribed_channels(current_channels)
 
-# 统一日志打印回调
 def print_log(msg):
     print(msg)
 
 def main():
-    # 日志配置
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -101,26 +98,27 @@ def main():
         ]
     )
 
-    ensure_ngrok_authtoken()
+    config = load_config()
+    channels = load_channels()
+
+    authtoken = config.get("ngrok_authtoken", "")
+    ensure_ngrok_authtoken(authtoken)
     ngrok_proc, public_url = start_ngrok()
     callback_url = public_url + CALLBACK_PATH
     print(f"[✓] 最终 Callback URL: {callback_url}")
 
-    # 1. 在新线程启动 Flask Server
-    flask_thread = threading.Thread(target=start_flask)
+    flask_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=NGROK_PORT, debug=False))
     flask_thread.daemon = True
     flask_thread.start()
     print("[*] Webhook 服务器已启动")
 
-    # 2. 启动异步处理线程（需先设置日志回调）
     set_uploader_log_handler(print_log)
     async_thread = threading.Thread(target=start_async_handler)
     async_thread.daemon = True
     async_thread.start()
     print("[*] 异步处理/上传线程已启动")
 
-    # 3. 同步订阅状态
-    sync_subscriptions(callback_url)
+    sync_subscriptions(callback_url, channels)
 
     try:
         while True:
