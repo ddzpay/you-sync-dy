@@ -25,12 +25,13 @@ class DouyinUploader:
             try:
                 screen_width, screen_height = pyautogui.size()
             except Exception:
-                screen_width = screen_height = None
+                screen_width = 1920
+                screen_height = 1080
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
                 headless=False, args=["--start-maximized"]
             )
-            context = await self.browser.new_context(viewport=None)
+            context = await self.browser.new_context(viewport={"width": screen_width, "height": screen_height})
             self.page = await context.new_page()
             self.log("[✓] 浏览器已启动")
 
