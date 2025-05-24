@@ -3,7 +3,6 @@ import pickle
 import pyautogui
 from playwright.async_api import async_playwright, TimeoutError
 import asyncio
-import time
 
 class DouyinUploader:
     def __init__(self, log_handler=None):
@@ -23,19 +22,24 @@ class DouyinUploader:
         async with self._browser_lock:
             if self.browser:
                 return
+            
+            try:
+                screen_width, screen_height = pyautogui.size()
+            except Exception:
+                screen_width, screen_height = 1920, 1080
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
-                headless=False,
-                args=["--start-maximized"]
+                headless=False, args=["--start-maximized"]
             )
-            # 关键：不要设置 viewport，保持 None
-            context = await self.browser.new_context(viewport=None)
+            # 关键：这里传递屏幕分辨率作为 viewport
+            context = await self.browser.new_context(
+                viewport={"width": screen_width, "height": screen_height}
+            )
             self.page = await context.new_page()
             self.log("[✓] 浏览器已启动")
-            # 等待窗口出现
-            time.sleep(1.2)
-            # 最大化（确保窗口最大化且内容适配）
-            pyautogui.hotkey('win', 'up')
+            import time
+            time.sleep(1.5)  # 等待窗口弹出
+            pyautogui.hotkey('win', 'up')  # 最大化当前活动窗口
 
     async def close_browser(self):
         if self.browser:
