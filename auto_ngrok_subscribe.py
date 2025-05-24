@@ -13,7 +13,7 @@ from webhook_server import app, start_async_handler, set_uploader_log_handler
 
 CONFIG_FILE = "config.json"
 CHANNELS_FILE = "channels.json"
-SUBSCRIBED_FILE = "subscribed_channels.json"  # 用于记录上次订阅的频道  
+SUBSCRIBED_FILE = "subscribed_channels.json"  # 用于记录上次订阅的频道
 ERROR_LOG_FILE = "subscription_error.log"      # 失败报警日志文件
 NGROK_PATH = "ngrok.exe"
 NGROK_PORT = 8000
@@ -47,9 +47,11 @@ def start_ngrok():
         time.sleep(1.5)
         try:
             res = requests.get("http://localhost:4040/api/tunnels").json()
-            public_url = res['tunnels'][0]['public_url']
-            print(f"[✓] 获取到 ngrok 地址: {public_url}")
-            return ngrok_proc, public_url
+            tunnels = res.get('tunnels')
+            if tunnels and len(tunnels) > 0 and 'public_url' in tunnels[0]:
+                public_url = tunnels[0]['public_url']
+                print(f"[✓] 获取到 ngrok 地址: {public_url}")
+                return ngrok_proc, public_url
         except Exception:
             continue
     print("[!] 无法获取 ngrok 公网地址")
@@ -76,11 +78,13 @@ def sync_subscriptions(callback_url, channels):
     previous_channels = load_previous_subscribed_channels()
     current_channels = set(channels)
     for cid in current_channels - previous_channels:
-        success = subscribe_channel(cid, callback_url)
+        success, msg = subscribe_channel(cid, callback_url)
+        print(msg)
         if not success:
             alarm_on_failure("订阅", cid, callback_url)
     for cid in previous_channels - current_channels:
-        success = unsubscribe_channel(cid, callback_url)
+        success, msg = unsubscribe_channel(cid, callback_url)
+        print(msg)
         if not success:
             alarm_on_failure("取消订阅", cid, callback_url)
     save_subscribed_channels(current_channels)
