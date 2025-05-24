@@ -13,7 +13,7 @@ from webhook_server import app, start_async_handler, set_uploader_log_handler
 
 CONFIG_FILE = "conf/config.ini"
 CHANNELS_FILE = "conf/channels.ini"
-SUBSCRIBED_FILE = "subscribed_channels.json"  # 用于记录上次订阅的频道
+SUBSCRIBED_FILE = os.path.join("utils", "subscribed_channels.json")  # 用于记录上次订阅的频道
 ERROR_LOG_FILE = "subscription_error.log"      # 失败报警日志文件
 NGROK_PATH = os.path.join("ffmpeg", "bin", "ngrok.exe")
 NGROK_PORT = 8000
