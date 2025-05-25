@@ -91,8 +91,30 @@ def start_cloudflared(tunnel_name):
         return None
     cmd = [cloudflared_path, "tunnel", "run", tunnel_name]
     print(f"[*] 启动 cloudflared: {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    def print_log_thread():
+        for line in proc.stdout:
+            print(f"[cloudflared] {line}", end="")
+    threading.Thread(target=print_log_thread, daemon=True).start()
+    # 启动后等2秒判断是否崩溃
+    time.sleep(2)
+    if proc.poll() is not None:
+        print("[!] cloudflared 启动失败，请检查 tunnel 名称和 Cloudflare 配置！")
+        return None
     return proc
+
+def check_callback_url(callback_url, timeout=5):
+    try:
+        resp = requests.get(callback_url, timeout=timeout)
+        if resp.status_code == 200:
+            print(f"[✓] Callback 地址可用: {callback_url}")
+            return True
+        else:
+            print(f"[!] Callback 地址返回状态码: {resp.status_code}")
+            return False
+    except Exception as e:
+        print(f"[!] Callback 地址访问异常: {e}")
+        return False
 
 def main():
     logging.basicConfig(
@@ -127,6 +149,13 @@ def main():
 
     callback_url = public_url.rstrip("/") + CALLBACK_PATH
     print(f"[✓] 最终 Callback URL: {callback_url}")
+
+    # 检查 callback 地址有效性
+    if not check_callback_url(callback_url):
+        print("[!] Callback 地址不可用，请检查 cloudflared 隧道和本地服务是否正常。")
+        if cloudflared_proc:
+            cloudflared_proc.terminate()
+        return
 
     flask_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False))
     flask_thread.daemon = True
