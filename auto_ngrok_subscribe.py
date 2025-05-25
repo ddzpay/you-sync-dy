@@ -21,6 +21,7 @@ CALLBACK_PATH = "/youtube/callback"
 DEFAULT_PORT = 8000
 CLOUDFLARED_EXE = "cloudflared.exe"  # cloudflared 文件名
 CLOUDFLARED_LOG = "cloudflared.log"
+CERT_PATH = os.path.abspath("config/cert.pem")  # <--- 新增
 # =============================
 
 def load_config():
@@ -129,10 +130,15 @@ def start_cloudflared(tunnel_name):
     if not tunnel_name:
         print("[!] 配置文件未设置 tunnel_name，无法启动 cloudflared")
         return None
+    if not os.path.isfile(CERT_PATH):
+        print(f"[!] 未找到 Cloudflare 认证证书: {CERT_PATH}")
+        return None
     cmd = [cloudflared_path, "tunnel", "run", tunnel_name]
     print(f"[*] 启动 cloudflared: {' '.join(cmd)}")
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        env = os.environ.copy()
+        env["TUNNEL_ORIGIN_CERT"] = CERT_PATH  # <--- 关键行: 设置环境变量
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
     except Exception as e:
         print(f"[!] 启动 cloudflared 失败: {e}")
         return None
