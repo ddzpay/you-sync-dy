@@ -1,4 +1,3 @@
-import subprocess
 import time
 import requests
 import threading
@@ -10,14 +9,13 @@ from subscribe import subscribe_channel, unsubscribe_channel
 from webhook_server import app, start_async_handler, set_uploader_log_handler
 
 # ========== 配置区域 ==========
-
 CONFIG_FILE = "config/config.ini"
 CHANNELS_FILE = "config/channels.ini"
 SUBSCRIBED_FILE = os.path.join("utils", "subscribed_channels.json")  # 用于记录上次订阅的频道
 ERROR_LOG_FILE = "subscription_error.log"      # 失败报警日志文件
-NGROK_PATH = "ngrok.exe"
-NGROK_PORT = 8000
+
 CALLBACK_PATH = "/youtube/callback"
+DEFAULT_PORT = 8000
 # =============================
 
 def load_config():
@@ -27,7 +25,12 @@ def load_config():
     if "global" in config:
         cfg["youtube_api_key"] = config.get("global", "youtube_api_key", fallback="")
         cfg["proxy"] = config.get("global", "proxy", fallback=None)
-        cfg["ngrok_authtoken"] = config.get("global", "ngrok_authtoken", fallback=None)
+    if "cloudflared" in config:
+        cfg["public_url"] = config.get("cloudflared", "public_url", fallback=None)
+        cfg["port"] = config.getint("cloudflared", "port", fallback=DEFAULT_PORT)
+    else:
+        cfg["public_url"] = None
+        cfg["port"] = DEFAULT_PORT
     return cfg
 
 def load_channels():
@@ -36,70 +39,6 @@ def load_channels():
     if "channels" in conf:
         return [k for k in conf["channels"].keys()]
     return []
-
-def ensure_ngrok_authtoken(authtoken):
-    config_dir = os.path.expanduser("~/.ngrok2")
-    config_file = os.path.join(config_dir, "ngrok.yml")
-    if not os.path.exists(config_file) or authtoken not in open(config_file, encoding="utf-8").read():
-        subprocess.run([NGROK_PATH, "config", "add-authtoken", authtoken])
-        print("[*] ngrok authtoken 已配置")
-    else:
-        print("[*] ngrok authtoken 已存在，无需重复配置")
-
-def start_ngrok():
-    print("[*] 正在启动 ngrok...")
-    ngrok_proc = subprocess.Popen([NGROK_PATH, "http", str(NGROK_PORT)],
-                                  stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.STDOUT)
-    # 等待ngrok启动并获取公网地址（重试机制）
-    for _ in range(10):
-        time.sleep(1.5)
-        try:
-            res = requests.get("http://localhost:4040/api/tunnels").json()
-            tunnels = res.get('tunnels')
-            if tunnels and len(tunnels) > 0 and 'public_url' in tunnels[0]:
-                public_url = tunnels[0]['public_url']
-                print(f"[✓] 获取到 ngrok 地址: {public_url}")
-                return ngrok_proc, public_url
-        except Exception:
-            continue
-    print("[!] 无法获取 ngrok 公网地址")
-    ngrok_proc.terminate()
-    exit(1)
-
-def check_ngrok_public_url():
-    try:
-        res = requests.get("http://localhost:4040/api/tunnels", timeout=2)
-        data = res.json()
-        tunnels = data.get("tunnels", [])
-        for tun in tunnels:
-            if tun.get("public_url"):
-                return True
-    except Exception:
-        pass
-    return False
-
-def health_check_ngrok(get_ngrok_proc, restart_callback, interval=60):
-    """
-    get_ngrok_proc: 一个函数，返回当前 ngrok_proc 对象
-    restart_callback: 一个函数，调用后会重启 ngrok 并返回 (ngrok_proc, public_url)
-    """
-    while True:
-        ngrok_proc = get_ngrok_proc()
-        # 1. 检查进程
-        if ngrok_proc.poll() is not None:
-            print("[!] ngrok 进程已退出，重启中...")
-            restart_callback()
-            time.sleep(3)
-            continue
-        # 2. 检查公网地址
-        if not check_ngrok_public_url():
-            print("[!] ngrok 公网地址不可用，重启中...")
-            ngrok_proc.terminate()
-            restart_callback()
-            time.sleep(3)
-            continue
-        time.sleep(interval)
 
 def load_previous_subscribed_channels():
     import json
@@ -150,31 +89,16 @@ def main():
     config = load_config()
     channels = load_channels()
 
-    authtoken = config.get("ngrok_authtoken", "")
-    ensure_ngrok_authtoken(authtoken)
+    public_url = config.get("public_url")
+    port = config.get("port", DEFAULT_PORT)
+    if not public_url:
+        print("[!] 配置文件未设置 cloudflared 的 public_url")
+        return
 
-    ngrok_proc, public_url = start_ngrok()
-    callback_url = public_url + CALLBACK_PATH
+    callback_url = public_url.rstrip("/") + CALLBACK_PATH
     print(f"[✓] 最终 Callback URL: {callback_url}")
 
-    # 用于健康检查的闭包
-    state = {"ngrok_proc": ngrok_proc, "public_url": public_url}
-    def get_ngrok_proc():
-        return state["ngrok_proc"]
-    def restart_ngrok():
-        ngrok_proc, public_url = start_ngrok()
-        state["ngrok_proc"] = ngrok_proc
-        state["public_url"] = public_url
-        print(f"[✓] ngrok 已重启，新的 Callback URL: {public_url + CALLBACK_PATH}")
-
-    # 启动健康检查线程
-    threading.Thread(
-        target=health_check_ngrok,
-        args=(get_ngrok_proc, restart_ngrok, 60),
-        daemon=True
-    ).start()
-
-    flask_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=NGROK_PORT, debug=False))
+    flask_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False))
     flask_thread.daemon = True
     flask_thread.start()
     print("[*] Webhook 服务器已启动")
@@ -191,8 +115,7 @@ def main():
         while True:
             time.sleep(10)
     except KeyboardInterrupt:
-        print("[✓] 程序被中断，关闭 ngrok...")
-        state["ngrok_proc"].terminate()
+        print("[✓] 程序被中断，退出...")
 
 if __name__ == "__main__":
     main()
