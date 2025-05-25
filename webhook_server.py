@@ -155,4 +155,4 @@ async def async_handler():
 # ====== 程序入口 ======
 if __name__ == "__main__":
     threading.Thread(target=start_async_handler, daemon=True).start()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=8000, debug=False)
