@@ -3,7 +3,7 @@ import logging
 import re
 import aiohttp
 import configparser
-from datetime import datetime, timezone  
+from datetime import datetime, timezone
 
 class YoutubeMonitor:
     def __init__(self):
