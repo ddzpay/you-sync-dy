@@ -27,6 +27,18 @@ class VideoDownloader:
         bin_path = os.path.join(project_root, "ffmpeg", "bin")
         os.environ["PATH"] = bin_path + os.pathsep + os.environ.get("PATH", "")
 
+    def run_with_live_output(self, cmd):
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        output_lines = []
+        for line in iter(process.stdout.readline, ''):
+            line = line.strip()
+            print(line)  # 实时输出到控制台
+            logging.info(line)  # 同时写入日志
+            output_lines.append(line)
+        process.stdout.close()
+        process.wait()
+        return process.returncode, "\n".join(output_lines)
+
     def download_video(self, channel_id, video_url, video_id, max_retry=3, retry_delay=3):
         if not self.is_ffmpeg_available():
             logging.error("[!] 缺少 ffmpeg.exe，请将其放在 'ffmpeg/bin/' 目录中")
@@ -55,8 +67,8 @@ class VideoDownloader:
         while attempt < max_retry:
             try:
                 logging.info(f"[↓] 正在下载: {video_url} (尝试 {attempt+1}/{max_retry})")
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
+                returncode, output = self.run_with_live_output(cmd)
+                if returncode == 0:
                     final_path = os.path.join(channel_dir, f"{video_id}.mp4")
                     if os.path.exists(final_path):
                         logging.info(f"[✓] 下载完成: {final_path}")
@@ -64,12 +76,13 @@ class VideoDownloader:
                     else:
                         logging.error(f"[!] 下载完成但未找到文件: {final_path}")
                 else:
-                    logging.error(f"[!] yt-dlp 执行失败 (尝试 {attempt+1}/{max_retry}):\n{result.stderr}")
+                    logging.error(f"[!] yt-dlp 执行失败 (尝试 {attempt+1}/{max_retry}):\n{output}")
             except Exception as e:
                 logging.error(f"[!] 执行 yt-dlp 出错 (尝试 {attempt+1}/{max_retry}): {e}")
             attempt += 1
             if attempt < max_retry:
                 time.sleep(retry_delay)
                 logging.info(f"[!] 下载失败，{retry_delay} 秒后重试...")
+
         logging.error(f"[!] 视频下载最终失败: {video_url}")
         return None
