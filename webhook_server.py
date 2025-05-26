@@ -2,6 +2,7 @@ import os
 import queue
 import threading
 import asyncio
+import logging
 from flask import Flask, request, Response
 import xml.etree.ElementTree as ET
 
@@ -10,6 +11,16 @@ from utils.video_downloader import VideoDownloader
 from utils.douyin_uploader import DouyinUploader
 
 app = Flask(__name__)
+
+# ====== 日志初始化 ======
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("webhook_server.log", encoding="utf-8")
+    ]
+)
 
 # ====== 全局同步队列 ======
 video_id_queue = queue.Queue()
@@ -36,7 +47,15 @@ async def get_video_id_async():
 @app.route('/youtube/callback', methods=['GET', 'POST'])
 def youtube_callback():
     if request.method == 'GET':
-        return Response(request.args.get("hub.challenge", ""), status=200)
+        challenge = request.args.get("hub.challenge", "")
+        if challenge:
+            logging.info(f"收到 YouTube 订阅验证 GET，challenge={challenge}")
+            resp = Response(challenge, status=200)
+            logging.info("已正确响应 challenge，订阅应已生效")
+            return resp
+        else:
+            logging.warning("收到 YouTube 订阅验证 GET，但没有 challenge 参数")
+            return Response("Missing challenge", status=400)
     elif request.method == 'POST':
         xml_data = request.data.decode("utf-8")
         root = ET.fromstring(xml_data)
