@@ -3,7 +3,7 @@ import logging
 import re
 import aiohttp
 import configparser
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 class YoutubeMonitor:
     def __init__(self):
@@ -90,3 +90,17 @@ class YoutubeMonitor:
         except Exception as e:
             logging.error(f"[!] 获取视频信息失败: {e}")
         return None
+
+    def is_recent(self, published_at, minutes=10):
+        """
+        检查视频是否在指定的分钟数内发布
+        published_at: ISO 8601 字符串, 例如 '2024-06-10T12:22:11Z'
+        """
+        try:
+            # 解析 published_at 字符串为 datetime
+            published_time = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            return (now - published_time) < timedelta(minutes=minutes)
+        except Exception as e:
+            logging.error(f"[!] 解析发布时间失败: {e}")
+            return False
