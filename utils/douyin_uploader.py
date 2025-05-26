@@ -27,7 +27,7 @@ class DouyinUploader:
                 screen_width, screen_height = pyautogui.size()
             except Exception:
                 screen_width, screen_height = 1920, 1080
-            
+
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
                 headless=False,
@@ -42,11 +42,11 @@ class DouyinUploader:
                 device_scale_factor=1
             )
             self.page = await context.new_page()
-            
+
             # 等待窗口弹出并手动最大化
-            time.sleep(1.5)  # 等待窗口弹出
-            pyautogui.hotkey('win', 'up')  # 最大化当前活动窗口
-            
+            time.sleep(1.5)
+            pyautogui.hotkey('win', 'up')
+
             self.log("[✓] 浏览器已启动并最大化")
 
     async def close_browser(self):
@@ -56,6 +56,7 @@ class DouyinUploader:
         if self.playwright:
             await self.playwright.stop()
             self.playwright = None
+        self.page = None
         self.log("[✓] 浏览器已关闭")
 
     async def save_cookies(self, path):
@@ -70,20 +71,53 @@ class DouyinUploader:
             cookies = pickle.load(f)
         return cookies
 
+    async def is_page_alive(self):
+        # 判断页面和浏览器对象是否活着
+        if self.page is None or self.browser is None:
+            return False
+        try:
+            return not self.page.is_closed()
+        except Exception:
+            return False
+
+    async def ensure_logged_in(self):
+        # 检查浏览器和页面是否存活，否则重启并用cookie自动登录
+        alive = await self.is_page_alive()
+        if not alive:
+            self.log("[!] 检测到浏览器或页面已关闭，正在重启并重新登录")
+            await self.close_browser()
+            await self.login()
+        else:
+            # 检查是否还在登录态
+            try:
+                await self.page.goto("https://creator.douyin.com/", timeout=self.timeout)
+                # 如果跳转到登录页说明登录态失效，需重新登录
+                if "login" in self.page.url:
+                    self.log("[!] 登录态失效，重新登录中")
+                    await self.close_browser()
+                    await self.login()
+            except Exception as e:
+                self.log(f"[!] 页面检测异常: {e}，尝试重启浏览器并重新登录")
+                await self.close_browser()
+                await self.login()
+
     async def login(self):
         await self.start_browser()
         await self.page.goto('https://creator.douyin.com/')
         if os.path.exists(self.cookies_path):
             self.log("[✓] 发现 Cookie，尝试自动登录...")
-            cookies = await self.load_cookies(self.cookies_path)
-            await self.page.context.add_cookies(cookies)
-            await self.page.reload()
             try:
-                await self.page.wait_for_url("**/creator-micro/home", timeout=15000)
-                self.log("[✓] Cookie 登录成功")
-                return True
-            except TimeoutError:
-                self.log("[!] Cookie 登录失败，准备扫码登录")
+                cookies = await self.load_cookies(self.cookies_path)
+                await self.page.context.add_cookies(cookies)
+                await self.page.reload()
+                try:
+                    await self.page.wait_for_url("**/creator-micro/home", timeout=15000)
+                    self.log("[✓] Cookie 登录成功")
+                    return True
+                except TimeoutError:
+                    self.log("[!] Cookie 登录失败，准备扫码登录")
+            except Exception as e:
+                self.log(f"[!] 加载 Cookie 失败: {e}，准备扫码登录")
 
         self.log("[✓] 请扫码登录抖音账号...")
         try:
@@ -95,10 +129,11 @@ class DouyinUploader:
             self.log("[!] 登录超时，请检查网络或扫码是否成功")
             return False
 
-    async def upload_video(self, video_path, max_retry=1, retry_delay=5):
+    async def upload_video(self, video_path, max_retry=3, retry_delay=5):
         attempt = 0
         while attempt < max_retry:
             try:
+                await self.ensure_logged_in()  # 检查并恢复登录
                 self.log(f"[✓] 准备上传视频: {video_path} (尝试 {attempt+1}/{max_retry})")
                 await self.page.goto('https://creator.douyin.com/creator-micro/content/upload')
 
@@ -157,9 +192,12 @@ class DouyinUploader:
 
             except Exception as e:
                 self.log(f"[!] 上传过程发生异常: {e}")
-            attempt += 1
-            if attempt < max_retry:
-                self.log(f"[!] 上传失败，{retry_delay} 秒后重试...")
-                await asyncio.sleep(retry_delay)
+                # 发生任何异常都先尝试关闭浏览器，下次循环重启并自动登录
+                await self.close_browser()
+                attempt += 1
+                if attempt < max_retry:
+                    self.log(f"[!] 上传失败，{retry_delay} 秒后重试...")
+                    await asyncio.sleep(retry_delay)
+                continue
         self.log(f"[!] 视频最终上传失败: {video_path}")
         return False
