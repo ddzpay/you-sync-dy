@@ -2,6 +2,7 @@ import os
 import pickle
 import pyautogui
 import time
+import configparser
 from playwright.async_api import async_playwright, TimeoutError
 import asyncio
 
@@ -129,12 +130,20 @@ class DouyinUploader:
             self.log("[!] 登录超时，请检查网络或扫码是否成功")
             return False
 
+    def read_channel_tags(self, ini_file='config/channels.ini'):
+        config = configparser.ConfigParser(allow_no_value=True, delimiters=('=', ':'))
+        config.optionxform = str  # 保持标签大小写
+        config.read(ini_file, encoding='utf-8')
+        if 'tags' in config:
+            return list(config['tags'].keys())
+        return []
+
     async def upload_video(self, video_path, max_retry=3, retry_delay=5):
         attempt = 0
         while attempt < max_retry:
             try:
                 await self.ensure_logged_in()  # 检查并恢复登录
-                self.log(f"[✓] 准备上传视频: {video_path} (尝试 {attempt+1}/{max_retry})")
+                self.log(f"[✓] 正在上传视频中: {video_path} (尝试 {attempt+1}/{max_retry})")
                 await self.page.goto('https://creator.douyin.com/creator-micro/content/upload')
 
                 if not os.path.exists(video_path):
@@ -158,6 +167,23 @@ class DouyinUploader:
                         self.log(f"[!] {retry_delay} 秒后重试...")
                         await asyncio.sleep(retry_delay)
                     continue
+
+                # === 插入标签填写逻辑 ===
+                tags = self.read_channel_tags('config/channels.ini')
+                if tags:
+                    tag_input = self.page.locator('div[contenteditable="true"][data-placeholder="添加作品简介"]')
+                    try:
+                        await tag_input.wait_for(timeout=10_000)
+                        for tag in tags:
+                            await tag_input.type(f"#{tag}", delay=50)  # delay=50表示每个字符间隔50毫秒
+                            await tag_input.press("Enter")
+                            await asyncio.sleep(0.3)
+                        self.log("[✓] 标签已全部填写")
+                    except TimeoutError:
+                        self.log("[!] 标签输入框未找到，跳过标签填写")
+                else:
+                    self.log("[!] 没有可用标签，跳过标签填写")
+                # === 标签逻辑结束 ===
 
                 # 点击发布按钮
                 publish_button = self.page.locator('div[class^="content-confirm-container"] button', has_text="发布")
