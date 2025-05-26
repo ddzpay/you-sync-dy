@@ -43,6 +43,7 @@ async def get_video_id_async():
 @app.route('/youtube/callback', methods=['GET', 'POST'])
 def youtube_callback():
     if request.method == 'GET':
+        # 订阅验证时，YouTube会发带hub.challenge的GET请求，直接返回challenge内容
         challenge = request.args.get("hub.challenge", "")
         if challenge:
             logging.info(f"收到 YouTube 订阅验证 GET，challenge={challenge}")
@@ -53,14 +54,23 @@ def youtube_callback():
     elif request.method == 'POST':
         try:
             xml_data = request.data.decode("utf-8")
+            # 解析XML
             root = ET.fromstring(xml_data)
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+
+            # 定义命名空间，必须包含 atom 和 yt 两个
+            ns = {
+                'atom': 'http://www.w3.org/2005/Atom',
+                'yt': 'http://www.youtube.com/xml/schemas/2015'
+            }
+
+            # 找到第一个entry节点
             entry = root.find("atom:entry", ns)
             if entry is not None:
-                video_id_elem = entry.find("atom:videoId", ns)
+                # 找yt:videoId节点
+                video_id_elem = entry.find("yt:videoId", ns)
                 if video_id_elem is not None and video_id_elem.text:
                     video_id = video_id_elem.text
-                    print(f"[✓] 收到新视频通知: {video_id}")
+                    logging.info(f"[✓] 收到新视频通知: {video_id}")
                     video_id_queue.put(video_id)
                 else:
                     logging.warning("收到了新视频通知，但未找到 videoId 字段")
@@ -97,7 +107,7 @@ async def handle_video(video_id):
     if downloaded_path:
         log_handler(f"[✓] 视频已下载: {downloaded_path}")
         try:
-            # 只用 put，不要写 put_nowait
+            # 只用 put，不要写 put_nowait，防止异常
             await upload_queue.put({
                 "video_id": video_id,
                 "channel_id": channel_id,
