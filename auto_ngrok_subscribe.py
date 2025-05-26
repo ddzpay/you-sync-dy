@@ -34,6 +34,7 @@ def load_config():
 
 def load_channels():
     conf = configparser.ConfigParser(allow_no_value=True)
+    conf.optionxform = str  # 保持频道ID原始大小写，不转为小写
     conf.read(CHANNELS_FILE, encoding="utf-8")
     if "channels" in conf:
         return [k for k in conf["channels"].keys()]
