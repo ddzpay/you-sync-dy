@@ -1,186 +1,37 @@
-import os
-import queue
-import threading
-import asyncio
+import requests
 import logging
-from flask import Flask, request, Response
-import xml.etree.ElementTree as ET
+import time
 
-from utils.youtube_monitor import YoutubeMonitor
-from utils.video_downloader import VideoDownloader
-from utils.douyin_uploader import DouyinUploader
+def subscribe_channel(channel_id: str, callback_url: str):
+    return _submit_subscription(channel_id, callback_url, mode="subscribe")
 
-app = Flask(__name__)
+def unsubscribe_channel(channel_id: str, callback_url: str):
+    return _submit_subscription(channel_id, callback_url, mode="unsubscribe")
 
-# ====== 日志初始化 ======
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("webhook_server.log", encoding="utf-8")
-    ]
-)
-
-# ====== 全局同步队列 ======
-video_id_queue = queue.Queue()
-
-# ====== 并发控制参数 ======
-MAX_CONCURRENT_UPLOADS = 3
-UPLOAD_QUEUE_MAXSIZE = 5  # 上传队列最大长度（可根据实际情况调整）
-upload_semaphore = None
-upload_queue = None
-
-def init_async_globals():
-    global upload_semaphore, upload_queue
-    if upload_semaphore is None:
-        upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
-    if upload_queue is None:
-        upload_queue = asyncio.Queue(maxsize=UPLOAD_QUEUE_MAXSIZE)
-
-# ====== 适配器：同步队列转异步 await ======
-async def get_video_id_async():
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, video_id_queue.get)
-
-# ====== 频道视频推送接收入口 ======
-@app.route('/youtube/callback', methods=['GET', 'POST'])
-def youtube_callback():
-    if request.method == 'GET':
-        challenge = request.args.get("hub.challenge", "")
-        if challenge:
-            logging.info(f"收到 YouTube 订阅验证 GET，challenge={challenge}")
-            resp = Response(challenge, status=200)
-            logging.info("已正确响应 challenge，订阅应已生效")
-            return resp
-        else:
-            logging.warning("收到 YouTube 订阅验证 GET，但没有 challenge 参数")
-            return Response("Missing challenge", status=400)
-    elif request.method == 'POST':
+def _submit_subscription(channel_id: str, callback_url: str, mode: str, retry=3, delay=3):
+    hub_url = 'https://pubsubhubbub.appspot.com/subscribe'
+    topic = f'https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}'
+    data = {
+        'hub.mode': mode,
+        'hub.topic': topic,
+        'hub.callback': callback_url,
+        'hub.verify': 'async'
+    }
+    for attempt in range(retry):
         try:
-            xml_data = request.data.decode("utf-8")
-            root = ET.fromstring(xml_data)
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
-            entry = root.find("atom:entry", ns)
-            if entry is not None:
-                video_id_elem = entry.find("atom:videoId", ns)
-                if video_id_elem is not None and video_id_elem.text:
-                    video_id = video_id_elem.text
-                    print(f"[✓] 收到新视频通知: {video_id}")
-                    video_id_queue.put(video_id)
-                else:
-                    logging.warning("收到了新视频通知，但未找到 videoId 字段")
+            resp = requests.post(hub_url, data=data, timeout=10)
+            if resp.status_code == 202:
+                msg = f"[✓] {mode.upper()} 成功: {channel_id}"
+                # print(msg)  # 不再内部打印
+                return True, msg
             else:
-                logging.info("收到 POST，但不是新视频通知（无 entry）")
-        except Exception as e:
-            logging.error(f"解析 POST 回调出错: {e}")
-        return Response("OK", status=200)
-
-# ====== 分析并下载视频后，加入上传队列 ======
-async def handle_video(video_id):
-    monitor = YoutubeMonitor()
-
-    # ----------- 去重检查 -----------
-    checked_videos = monitor.checked_videos
-    if video_id in checked_videos.values():
-        log_handler(f"[-] 视频 {video_id} 已处理过，跳过。")
-        return
-    # ----------- 去重检查结束 ---------------
-
-    downloader = VideoDownloader()
-
-    info = await monitor.fetch_video_details(video_id)
-    if not info:
-        log_handler(f"[!] 获取视频信息失败: {video_id}")
-        return
-
-    if not monitor.is_recent(info['published_at']):
-        log_handler(f"[-] 跳过：发布时间超过2分钟：{info['published_at']}")
-        return
-
-    if info['duration'] is None or info['duration'] > 60:
-        log_handler(f"[-] 跳过：非 Shorts 视频（时长 {info['duration']} 秒）")
-        return
-
-    channel_id = info['channel_id']
-    video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-    downloaded_path = downloader.download_video(channel_id, video_url, video_id)
-    if downloaded_path:
-        log_handler(f"[✓] 视频已下载: {downloaded_path}")
-        try:
-            await upload_queue.put({
-                "video_id": video_id,
-                "channel_id": channel_id,
-                "path": downloaded_path
-            })
-        except asyncio.QueueFull:
-            log_handler(f"[!] 上传队列已满（容量: {UPLOAD_QUEUE_MAXSIZE}），丢弃本次任务: {downloaded_path}")
-            try:
-                os.remove(downloaded_path)
-                log_handler(f"[🗑] 上传队列溢出，已删除未入队本地文件: {downloaded_path}")
-            except Exception as e:
-                log_handler(f"[!] 删除本地文件失败: {e}")
-    else:
-        log_handler(f"[!] 视频下载失败: {video_url}")
-
-# ====== 全局唯一 DouyinUploader 实例 ======
-uploader = DouyinUploader()
-log_handler = print  # 默认日志处理为print，主程序可set_uploader_log_handler覆盖
-
-def set_uploader_log_handler(handler):
-    global log_handler
-    log_handler = handler
-    uploader.log_handler = handler
-
-# ====== 上传 Worker（并发控制）======
-async def upload_worker():
-    while True:
-        task = await upload_queue.get()
-        async with upload_semaphore:
-            await process_upload_task(task)
-        upload_queue.task_done()
-
-async def process_upload_task(task):
-    video_id = task['video_id']
-    channel_id = task['channel_id']
-    path = task['path']
-    monitor = YoutubeMonitor()
-
-    log_handler(f"[↑] 开始上传: {video_id}")
-    success = await uploader.upload_video(path)
-    if success:
-        monitor.record_video(channel_id, video_id)
-        try:
-            os.remove(path)
-            log_handler(f"[🗑] 上传成功，已删除本地文件: {path}")
-        except Exception as e:
-            log_handler(f"[!] 删除失败: {e}")
-    else:
-        log_handler(f"[!] 上传失败，保留文件: {path}")
-
-# ====== 启动多个上传线程 ======
-def start_upload_workers():
-    for _ in range(MAX_CONCURRENT_UPLOADS):
-        asyncio.create_task(upload_worker())
-
-# ====== 主异步处理线程 ======
-def start_async_handler():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(async_handler())
-
-async def async_handler():
-    init_async_globals()
-    await uploader.start_browser()
-    await uploader.login()
-    start_upload_workers()
-    log_handler("[*] 等待 Google 推送更新通知中... 按 Ctrl+C 退出")
-    while True:
-        video_id = await get_video_id_async()
-        await handle_video(video_id)
-
-# ====== 程序入口 ======
-if __name__ == "__main__":
-    threading.Thread(target=start_async_handler, daemon=True).start()
-    app.run(host="0.0.0.0", port=8000, debug=False)
+                msg = f"[!] {mode.upper()} 失败: {resp.status_code} - {resp.text}"
+                # print(msg)  # 不再内部打印
+        except requests.exceptions.RequestException as e:
+            msg = f"[!] 网络异常 ({mode}, 尝试 {attempt+1}/{retry}): {e}"
+            # print(msg)  # 不再内部打印
+        if attempt < retry - 1:
+            time.sleep(delay)
+    msg = f"[!] {mode.upper()} 最终失败: {channel_id}"
+    # print(msg)  # 不再内部打印
+    return False, msg
