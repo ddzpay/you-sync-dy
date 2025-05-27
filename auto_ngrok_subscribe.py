@@ -28,7 +28,6 @@ def load_config():
     cfg = {}
     if "global" in config:
         cfg["youtube_api_key"] = config.get("global", "youtube_api_key", fallback="")
-        cfg["proxy"] = config.get("global", "proxy", fallback=None)
         cfg["ngrok_authtoken"] = config.get("global", "ngrok_authtoken", fallback=None)
     return cfg
 
