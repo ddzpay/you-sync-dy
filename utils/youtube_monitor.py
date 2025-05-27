@@ -3,30 +3,31 @@ import logging
 import re
 import aiohttp
 import configparser
+import json
 from datetime import datetime, timezone, timedelta
 
 class YoutubeMonitor:
     def __init__(self):
         self.history_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'history.json'))
-        os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
+        hist_dir = os.path.dirname(self.history_file)
+        if hist_dir and not os.path.exists(hist_dir):
+            os.makedirs(hist_dir, exist_ok=True)
         self.checked_videos = self.load_history()
 
-        # 加载 config.ini 获取 API key 和可选代理设置
+        # 加载 config.ini 获取 API key
         config_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'config.ini'))
         config = configparser.ConfigParser()
         config.read(config_path, encoding='utf-8')
         if "global" in config:
             self.api_key = config.get("global", "youtube_api_key", fallback="")
-            self.proxy = config.get("global", "proxy", fallback=None)
             if not self.api_key:
                 logging.error("[!] config.ini 中缺少 youtube_api_key")
+                raise SystemExit("[!] 缺少 YouTube API Key，程序退出")
         else:
             logging.error("[!] config.ini 中缺少 [global] 部分")
-            self.api_key = ""
-            self.proxy = None
+            raise SystemExit("[!] 缺少 [global] 配置，程序退出")
 
     def load_history(self):
-        import json
         try:
             with open(self.history_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -34,7 +35,6 @@ class YoutubeMonitor:
             return {}
 
     def save_history(self):
-        import json
         try:
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(self.checked_videos, f, ensure_ascii=False, indent=4)
@@ -52,13 +52,17 @@ class YoutubeMonitor:
         return None
 
     def parse_iso_duration(self, iso_str):
-        pattern = re.compile(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?')
-        match = pattern.match(iso_str)
-        if not match:
-            logging.warning(f"[!] 无法解析视频时长: {iso_str}")
+        try:
+            pattern = re.compile(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?')
+            match = pattern.match(iso_str)
+            if not match:
+                logging.warning(f"[!] 无法解析视频时长: {iso_str}")
+                return None
+            h, m, s = map(lambda x: int(x) if x else 0, match.groups())
+            return h * 3600 + m * 60 + s
+        except Exception as e:
+            logging.error(f"[!] 解析视频时长异常: {e}")
             return None
-        h, m, s = map(lambda x: int(x) if x else 0, match.groups())
-        return h * 3600 + m * 60 + s
 
     async def fetch_video_details(self, video_id):
         url = (
@@ -67,9 +71,10 @@ class YoutubeMonitor:
         )
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, proxy=self.proxy) as response:
+                async with session.get(url) as response:
+                    text = await response.text()
                     if response.status == 200:
-                        data = await response.json()
+                        data = json.loads(text)
                         items = data.get("items", [])
                         if items:
                             item = items[0]
@@ -83,21 +88,19 @@ class YoutubeMonitor:
                                 "video_id": video_id,
                                 "channel_id": snippet.get("channelId"),
                                 "published_at": publish_time,
-                                "duration": duration
+                                "duration": duration,
+                                "title": snippet.get("title", "")
                             }
+                        else:
+                            logging.warning(f"[!] 未找到视频信息: {video_id}")
                     else:
-                        logging.error(f"[!] 请求失败: 状态码 {response.status}")
+                        logging.error(f"[!] 请求失败: 状态码 {response.status}, 内容: {text}")
         except Exception as e:
             logging.error(f"[!] 获取视频信息失败: {e}")
         return None
 
     def is_recent(self, published_at, minutes=10):
-        """
-        检查视频是否在指定的分钟数内发布
-        published_at: ISO 8601 字符串, 例如 '2024-06-10T12:22:11Z'
-        """
         try:
-            # 解析 published_at 字符串为 datetime
             published_time = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
             return (now - published_time) < timedelta(minutes=minutes)
