@@ -5,22 +5,13 @@ import asyncio
 import logging
 from flask import Flask, request, Response
 import xml.etree.ElementTree as ET
+from datetime import datetime
 
 from utils.youtube_monitor import YoutubeMonitor
 from utils.video_downloader import VideoDownloader
 from utils.douyin_uploader import DouyinUploader
 
 app = Flask(__name__)
-
-# 日志初始化
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("webhook_server.log", encoding="utf-8")
-    ]
-)
 
 video_id_queue = queue.Queue()
 
@@ -43,7 +34,6 @@ async def get_video_id_async():
 @app.route('/youtube/callback', methods=['GET', 'POST'])
 def youtube_callback():
     if request.method == 'GET':
-        # 订阅验证时，YouTube会发带hub.challenge的GET请求，直接返回challenge内容
         challenge = request.args.get("hub.challenge", "")
         if challenge:
             logging.info(f"收到 YouTube 订阅验证 GET，challenge={challenge}")
@@ -54,19 +44,13 @@ def youtube_callback():
     elif request.method == 'POST':
         try:
             xml_data = request.data.decode("utf-8")
-            # 解析XML
             root = ET.fromstring(xml_data)
-
-            # 定义命名空间，必须包含 atom 和 yt 两个
             ns = {
                 'atom': 'http://www.w3.org/2005/Atom',
                 'yt': 'http://www.youtube.com/xml/schemas/2015'
             }
-
-            # 找到第一个entry节点
             entry = root.find("atom:entry", ns)
             if entry is not None:
-                # 找yt:videoId节点
                 video_id_elem = entry.find("yt:videoId", ns)
                 if video_id_elem is not None and video_id_elem.text:
                     video_id = video_id_elem.text
@@ -103,11 +87,16 @@ async def handle_video(video_id):
 
     channel_id = info['channel_id']
     video_url = f"https://www.youtube.com/watch?v={video_id}"
-    downloaded_path = downloader.download_video(channel_id, video_url, video_id)
+
+    # --- download_video 异步化改造 start ---
+    loop = asyncio.get_running_loop()
+    downloaded_path = await loop.run_in_executor(
+        None, downloader.download_video, channel_id, video_url, video_id
+    )
+    # --- download_video 异步化改造 end ---
+
     if downloaded_path:
-        log_handler(f"[✓] 视频已下载: {downloaded_path}")
         try:
-            # 只用 put，不要写 put_nowait，防止异常
             await upload_queue.put({
                 "video_id": video_id,
                 "channel_id": channel_id,
@@ -133,10 +122,15 @@ def set_uploader_log_handler(handler):
 
 async def upload_worker():
     while True:
-        task = await upload_queue.get()
-        async with upload_semaphore:
-            await process_upload_task(task)
-        upload_queue.task_done()
+        try:
+            task = await upload_queue.get()
+            async with upload_semaphore:
+                await process_upload_task(task)
+            upload_queue.task_done()
+        except Exception as e:
+            # 异常保护，防止worker因异常退出
+            log_handler(f"[!] upload_worker异常: {e}",)
+            logging.exception("upload_worker异常")
 
 async def process_upload_task(task):
     video_id = task['video_id']
@@ -149,7 +143,8 @@ async def process_upload_task(task):
         monitor.record_video(channel_id, video_id)
         try:
             os.remove(path)
-            log_handler(f"[🗑] 上传成功，已删除本地文件: {path}")
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_handler(f"[{now}] [✓] 上传成功，已删除本地文件: {path}")
         except Exception as e:
             log_handler(f"[!] 删除失败: {e}")
     else:
@@ -162,7 +157,6 @@ def start_upload_workers():
 def start_async_handler():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    # 注意：必须在事件循环内初始化 upload_queue
     loop.run_until_complete(async_handler())
 
 async def async_handler():
@@ -177,4 +171,4 @@ async def async_handler():
 
 if __name__ == "__main__":
     threading.Thread(target=start_async_handler, daemon=True).start()
-    app.run(host="0.0.0.0", port=8000, debug=False)
+    app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
