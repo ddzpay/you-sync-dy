@@ -104,7 +104,7 @@ async def handle_video(video_id):
             log_handler(f"[!] 上传队列已满（容量: {UPLOAD_QUEUE_MAXSIZE}），丢弃本次任务: {downloaded_path}")
             try:
                 os.remove(downloaded_path)
-                log_handler(f"[🗑] 上传队列溢出，已删除未入队本地文件: {downloaded_path}")
+                log_handler(f"[x] 上传队列溢出，已删除未入队本地文件: {downloaded_path}")
             except Exception as e:
                 log_handler(f"[!] 删除本地文件失败: {e}")
     else:
@@ -160,7 +160,7 @@ async def async_handler():
     await uploader.start_browser()
     await uploader.ensure_logged_in()
     start_upload_workers()
-    log_handler("[√] 正在监控 YouTube 更新推送中... ")
+    log_handler("[✓] 正在监控 YouTube 频道更新中... ")
     while True:
         video_id = await get_video_id_async()
         await handle_video(video_id)

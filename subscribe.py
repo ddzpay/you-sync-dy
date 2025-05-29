@@ -22,7 +22,7 @@ def _submit_subscription(channel_id: str, callback_url: str, mode: str, retry: i
             resp = requests.post(hub_url, data=data, timeout=10)
             if resp.status_code == 202:
                 msg = f"[✓] {mode.upper()} 成功: {channel_id}"
-                logging.info(msg)
+                #logging.info(msg)
                 return True, msg
             else:
                 msg = f"[!] {mode.upper()} 失败: {resp.status_code} - {resp.text}"

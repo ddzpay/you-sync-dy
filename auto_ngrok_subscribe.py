@@ -109,19 +109,17 @@ def alarm_on_failure(action, channel_id, callback_url):
 def sync_subscriptions(callback_url, channels):
     previous_channels = load_previous_subscribed_channels()
     current_channels = set(channels)
-
     for cid in current_channels - previous_channels:
         success, msg = subscribe_channel(cid, callback_url)
+        # 只在这里输出日志，不在 subscribe.py 输出
         logging.info(msg)
         if not success:
             alarm_on_failure("订阅", cid, callback_url)
-
     for cid in previous_channels - current_channels:
         success, msg = unsubscribe_channel(cid, callback_url)
         logging.info(msg)
         if not success:
             alarm_on_failure("取消订阅", cid, callback_url)
-
     save_subscribed_channels(current_channels)
 
 def print_startup_banner(public_url):
@@ -142,6 +140,18 @@ def status_monitor(start_time):
         h = uptime // 3600
         m = (uptime % 3600) // 60
         logging.info(f"[✓] 系统运行正常 - 运行时间: {h}小时{m}分钟")
+
+def wait_webhook_ready(url, timeout=10):
+    import requests
+    for _ in range(timeout):
+        try:
+            r = requests.get(url)
+            if r.status_code in (200, 400):
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    raise RuntimeError("Webhook 服务未准备好")
 
 def main():
     setup_logging()
@@ -193,6 +203,9 @@ def main():
     # 等待waitress日志输出再打印横幅
     waitress_started.wait()
     print_startup_banner(public_url)
+
+    # 新增：确保 webhook 服务 ready 再发起订阅
+    wait_webhook_ready(f"http://127.0.0.1:{NGROK_PORT}/youtube/callback")
 
     # 状态监控线程（防止睡眠）
     start_time = time.time()
