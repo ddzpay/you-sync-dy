@@ -1,18 +1,17 @@
 import os
-import json
 import pyautogui
+import json
+import asyncio
 import time
 from playwright.async_api import async_playwright, TimeoutError
-import asyncio
 
 class DouyinUploader:
     def __init__(self, log_handler=None):
         self.playwright = None
-        self.browser = None
-        self.context = None
+        self.browser = None  # 注意：这里是 persistent context 对象
         self.page = None
-        self.cookies_path = 'cookies/douyin.json'
-        self.timeout = 60_000  # ms
+        self.timeout = 60_000
+        self.user_data_dir = 'user_data/douyin1'
         self._browser_lock = asyncio.Lock()
         self.log_handler = log_handler or (lambda msg: None)
 
@@ -20,10 +19,17 @@ class DouyinUploader:
         if self.log_handler:
             self.log_handler(msg)
 
+    def _is_logged_in_url(self, url: str) -> bool:
+        return (
+            url.endswith("/creator-micro/home")
+            or url.startswith("https://creator.douyin.com/creator-micro/content/manage")
+        )
+
     async def start_browser(self):
         async with self._browser_lock:
             if self.browser:
                 return
+
             try:
                 screen_width, screen_height = pyautogui.size()
             except Exception:
@@ -34,43 +40,38 @@ class DouyinUploader:
             viewport_height = int(screen_height / SCALE_FACTOR)
 
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
+            self.browser = await self.playwright.chromium.launch_persistent_context(
+                user_data_dir=self.user_data_dir,
                 headless=False,
+                viewport={'width': viewport_width, 'height': viewport_height},
+                device_scale_factor=SCALE_FACTOR,
                 args=[
                     "--start-maximized",
                     f"--force-device-scale-factor={SCALE_FACTOR}",
-                    "--disable-web-security"
+                    "--disable-web-security",
+                    "--disable-blink-features=AutomationControlled"
                 ]
             )
-            self.context = await self.browser.new_context(
-                viewport={'width': viewport_width, 'height': viewport_height},
-                device_scale_factor=SCALE_FACTOR
+            
+            # 注入隐藏 webdriver 的脚本
+            await self.browser.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             )
-            self.page = await self.context.new_page()
 
+            self.page = self.browser.pages[0] if self.browser.pages else await self.browser.new_page()
+            
             await asyncio.sleep(1.5)
             pyautogui.hotkey('win', 'up')
             self.log("[✓] 浏览器已启动")
 
     async def close_browser(self):
         try:
-            if self.page:
-                await self.page.close()
-        except Exception:
-            pass
-        self.page = None
-        try:
-            if self.context:
-                await self.context.close()
-        except Exception:
-            pass
-        self.context = None
-        try:
             if self.browser:
                 await self.browser.close()
         except Exception:
             pass
         self.browser = None
+        self.page = None
         try:
             if self.playwright:
                 await self.playwright.stop()
@@ -78,26 +79,6 @@ class DouyinUploader:
             pass
         self.playwright = None
         self.log("[✓] 浏览器已关闭")
-
-    async def save_cookies(self, path):
-        cookies = await self.page.context.cookies()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(cookies, f, ensure_ascii=False, indent=2)
-        self.log("[✓] Cookie 已保存")
-
-    async def load_cookies(self, path):
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                cookies = json.load(f)
-            return cookies
-        except Exception as e:
-            self.log(f"[!] Cookie 加载失败: {e}，已删除损坏的cookie文件")
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-            return []
 
     async def is_page_alive(self):
         if self.page is None or self.browser is None:
@@ -107,82 +88,45 @@ class DouyinUploader:
         except Exception:
             return False
 
-    def _is_logged_in_url(self, url: str) -> bool:
-        # 主页或内容管理页都算已登录
-        return (
-            url.endswith("/creator-micro/home")
-            or url.startswith("https://creator.douyin.com/creator-micro/content/manage")
-        )
-
     async def ensure_logged_in(self):
         alive = await self.is_page_alive()
         if not alive:
             self.log("[!] 检测到浏览器或页面已关闭，正在重启浏览器")
             await self.start_browser()
+
         try:
-            # 只有当前页面不是主页和内容管理页才跳转主页
-            if not self._is_logged_in_url(self.page.url):
-                await self.page.goto("https://creator.douyin.com/creator-micro/home", timeout=self.timeout)
             current_url = self.page.url
-            #self.log(f"[调试] 当前页面URL: {current_url}")
-            if current_url == "https://creator.douyin.com/":
-                self.log("[!] 未登录或Cookie失效，准备重新登录")
-                await self.login()
-            elif self._is_logged_in_url(current_url):
-                pass  # 已登录，无需操作
-            else:
-                self.log(f"[!] 未知页面({current_url})，尝试重新登录")
-                await self.login()
-        except Exception as e:
-            self.log(f"[!] 页面检测异常: {e}，尝试重新登录")
-            await self.login()
-
-    async def login(self):
-        await self.start_browser()
-        if not self._is_logged_in_url(self.page.url):
-            await self.page.goto('https://creator.douyin.com/creator-micro/home')
-        current_url = self.page.url
-        #self.log(f"[调试] 登录流程访问后URL: {current_url}")
-
-        if self._is_logged_in_url(current_url):
-            self.log("[✓] 已登录，无需再次登录")
-            return True
-
-        if os.path.exists(self.cookies_path):
-            self.log("[✓] 发现 Cookie，尝试自动登录...")
-            try:
-                cookies = await self.load_cookies(self.cookies_path)
-                await self.page.context.add_cookies(cookies)
-                if not self._is_logged_in_url(self.page.url):
-                    await self.page.goto('https://creator.douyin.com/creator-micro/home')
+            if not self._is_logged_in_url(current_url):
+                self.log("[✓] 页面未处于登录状态，尝试跳转主页检测")
+                await self.page.goto("https://creator.douyin.com/creator-micro/home", timeout=self.timeout)
                 current_url = self.page.url
-                #self.log(f"[调试] 自动登录后URL: {current_url}")
-                if self._is_logged_in_url(current_url):
-                    self.log("[✓] Cookie 登录成功")
-                    return True
-                elif current_url == "https://creator.douyin.com/":
-                    self.log("[!] Cookie 登录失败，准备扫码登录")
-                else:
-                    self.log(f"[!] Cookie登录后未知页面({current_url})，准备扫码登录")
-            except Exception as e:
-                self.log(f"[!] 加载 Cookie 失败: {e}，准备扫码登录")
 
-        self.log("[✓] 请扫码登录抖音账号...")
+            if current_url == "https://creator.douyin.com/":
+                self.log("[!] Cookie 失效或未登录，等待扫码登录")
+                await self.wait_for_login()
+            elif self._is_logged_in_url(current_url):
+                self.log("[✓] 已处于登录状态")
+            else:
+                self.log(f"[!] 当前页面未知: {current_url}，尝试扫码登录")
+                await self.wait_for_login()
+        except Exception as e:
+            self.log(f"[!] 页面检测异常: {e}，尝试扫码登录")
+            await self.wait_for_login()
+
+    async def wait_for_login(self):
         try:
+            self.log("[✓] 请扫码登录抖音账号...")
             await self.page.wait_for_url("**/creator-micro/home", timeout=self.timeout)
-            self.log("[✓] 扫码登录成功，保存新的 Cookie")
-            await self.save_cookies(self.cookies_path)
-            return True
+            self.log("[✓] 登录成功")
         except TimeoutError:
             self.log("[!] 登录超时，请检查网络或扫码是否成功")
-            return False
 
-    async def upload_video(self, video_path, max_retry=3, retry_delay=5):
+    async def upload_video(self, video_path, max_retry=3, retry_delay=2):
         attempt = 0
         while attempt < max_retry:
             try:
                 await self.ensure_logged_in()
-                self.log(f"[✓] 正在上传视频中，请稍后...(尝试 {attempt+1}/{max_retry})")
+                self.log(f"[✓] 正在上传视频中...(尝试 {attempt+1}/{max_retry})")
                 await self.page.goto('https://creator.douyin.com/creator-micro/content/upload')
 
                 if not os.path.exists(video_path):
@@ -222,7 +166,7 @@ class DouyinUploader:
                         self.log("[✓] 页面跳转到发布管理页，发布成功")
                         return True
                     except TimeoutError:
-                        self.log("[!] 未检测到发布成功后的跳转，上传可能失败")
+                        self.log("[!] 未检测到跳转，上传可能失败")
                         attempt += 1
                         if attempt < max_retry:
                             self.log(f"[!] {retry_delay} 秒后重试...")
@@ -230,7 +174,7 @@ class DouyinUploader:
                         continue
 
                 except TimeoutError:
-                    self.log("[!] 发布按钮未加载，发布失败")
+                    self.log("[!] 发布按钮未加载")
                     attempt += 1
                     if attempt < max_retry:
                         self.log(f"[!] {retry_delay} 秒后重试...")
@@ -238,10 +182,10 @@ class DouyinUploader:
                     continue
 
             except Exception as e:
-                self.log(f"[!] 上传过程发生异常: {e}")
+                self.log(f"[!] 上传异常: {e}")
                 attempt += 1
                 if attempt < max_retry:
-                    self.log(f"[!] 上传失败，{retry_delay} 秒后重试...")
+                    self.log(f"[!] {retry_delay} 秒后重试...")
                     await asyncio.sleep(retry_delay)
                 continue
 
