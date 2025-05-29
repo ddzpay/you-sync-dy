@@ -78,7 +78,7 @@ async def handle_video(video_id):
         return
 
     if not monitor.is_recent(info['published_at']):
-        log_handler(f"[-] 跳过：发布时间超过2分钟：{info['published_at']}")
+        log_handler(f"[-] 跳过：发布时间已超过2分钟，发布时间：{info['published_at']}")
         return
 
     if info['duration'] is None or info['duration'] > 60:
@@ -160,15 +160,10 @@ async def async_handler():
     await uploader.start_browser()
     await uploader.ensure_logged_in()
     start_upload_workers()
-    log_handler("[*] 等待 Google 推送更新通知中... 按 Ctrl+C 退出")
+    log_handler("[√] 正在监控 YouTube 更新推送中... ")
     while True:
         video_id = await get_video_id_async()
         await handle_video(video_id)
 
 # 供主程序导入队列用
 __all__ = ['app', 'start_async_handler', 'set_uploader_log_handler', 'video_id_queue']
-
-if __name__ == "__main__":
-    threading.Thread(target=start_async_handler, daemon=True).start()
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=8000, threads=6)

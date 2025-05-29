@@ -126,14 +126,13 @@ def sync_subscriptions(callback_url, channels):
 
 def print_startup_banner(public_url):
     print("\n" + "="*60)
-    print("🎬 YouTube Shorts 自动转载系统")
+    print("you sync dy 自动转载系统")
     print("="*60)
-    print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"🌐 Webhook地址: {public_url}/youtube/callback")
-    print(f"📡 本地服务: http://127.0.0.1:{NGROK_PORT}")
-    print(f"🎯 状态: 等待YouTube推送通知...")
+    print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Webhook地址: {public_url}/youtube/callback")
+    print(f"本地服务: http://127.0.0.1:{NGROK_PORT}")
     print("="*60)
-    print("💡 提示: 按 Ctrl+C 退出系统")
+    print("温馨提示: 如要退出系统，请先按 Ctrl+C 关闭ngrok服务，再关闭（X）CMD控制台")
     print("="*60 + "\n")
 
 def status_monitor(start_time):
@@ -142,7 +141,7 @@ def status_monitor(start_time):
         uptime = int(time.time() - start_time)
         h = uptime // 3600
         m = (uptime % 3600) // 60
-        logging.info(f"💓 系统运行正常 - 运行时间: {h}小时{m}分钟")
+        logging.info(f"[✓] 系统运行正常 - 运行时间: {h}小时{m}分钟")
 
 def main():
     setup_logging()
