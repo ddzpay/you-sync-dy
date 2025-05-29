@@ -97,7 +97,7 @@ class DouyinUploader:
         try:
             current_url = self.page.url
             if not self._is_logged_in_url(current_url):
-                self.log("[✓] 页面未处于登录状态，尝试跳转主页检测")
+                self.log("[✓] 正在打开抖音创作者平台")
                 await self.page.goto("https://creator.douyin.com/creator-micro/home", timeout=self.timeout)
                 current_url = self.page.url
 
@@ -105,7 +105,7 @@ class DouyinUploader:
                 self.log("[!] Cookie 失效或未登录，等待扫码登录")
                 await self.wait_for_login()
             elif self._is_logged_in_url(current_url):
-                self.log("[✓] 已处于登录状态")
+                self.log("[✓] 已登录抖音创作者中心")
             else:
                 self.log(f"[!] 当前页面未知: {current_url}，尝试扫码登录")
                 await self.wait_for_login()

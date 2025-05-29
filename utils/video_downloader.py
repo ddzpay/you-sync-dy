@@ -10,8 +10,8 @@ class VideoDownloader:
         self.base_dir = os.path.join(script_dir, 'downloads')
         os.makedirs(self.base_dir, exist_ok=True)
 
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.bin_path = os.path.join(project_root, "ffmpeg", "bin")
+        project_root = os.path.dirname(script_dir)
+        self.bin_path = os.path.join(project_root, 'tools')
         exe_suffix = ".exe" if sys.platform.startswith("win") else ""
         self.ffmpeg_path = os.path.join(self.bin_path, f"ffmpeg{exe_suffix}")
         self.ytdlp_path = os.path.join(self.bin_path, f"yt-dlp{exe_suffix}")
@@ -24,11 +24,11 @@ class VideoDownloader:
 
     def download_video(self, channel_id, video_url, video_id, max_retry=2, retry_delay=2):
         if not self.is_ffmpeg_available():
-            logging.error("[!] 缺少 ffmpeg，可在 'ffmpeg/bin/' 目录中")
+            logging.error("[!] 缺少 ffmpeg，检查可在 'tools' 目录中")
             return None
 
         if not self.is_ytdlp_available():
-            logging.error("[!] 缺少 yt-dlp，可在 'ffmpeg/bin/' 目录中")
+            logging.error("[!] 缺少 yt-dlp，检查可在 'tools' 目录中")
             return None
 
         channel_dir = os.path.join(self.base_dir, channel_id)
