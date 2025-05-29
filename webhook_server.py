@@ -16,7 +16,7 @@ app = Flask(__name__)
 video_id_queue = queue.Queue()
 
 MAX_CONCURRENT_UPLOADS = 3
-UPLOAD_QUEUE_MAXSIZE = 5  # 上传队列最大长度
+UPLOAD_QUEUE_MAXSIZE = 5
 upload_semaphore = None
 upload_queue = None
 
@@ -88,12 +88,10 @@ async def handle_video(video_id):
     channel_id = info['channel_id']
     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # --- download_video 异步化改造 start ---
     loop = asyncio.get_running_loop()
     downloaded_path = await loop.run_in_executor(
         None, downloader.download_video, channel_id, video_url, video_id
     )
-    # --- download_video 异步化改造 end ---
 
     if downloaded_path:
         try:
@@ -128,7 +126,6 @@ async def upload_worker():
                 await process_upload_task(task)
             upload_queue.task_done()
         except Exception as e:
-            # 异常保护，防止worker因异常退出
             log_handler(f"[!] upload_worker异常: {e}")
             logging.exception("upload_worker异常")
 
@@ -137,7 +134,6 @@ async def process_upload_task(task):
     channel_id = task['channel_id']
     path = task['path']
     monitor = YoutubeMonitor()
-    #log_handler(f"[↑] 开始上传: {video_id}")
     success = await uploader.upload_video(path)
     if success:
         monitor.record_video(channel_id, video_id)
@@ -169,6 +165,10 @@ async def async_handler():
         video_id = await get_video_id_async()
         await handle_video(video_id)
 
+# 供主程序导入队列用
+__all__ = ['app', 'start_async_handler', 'set_uploader_log_handler', 'video_id_queue']
+
 if __name__ == "__main__":
     threading.Thread(target=start_async_handler, daemon=True).start()
-    app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=8000, threads=6)

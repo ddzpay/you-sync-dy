@@ -4,25 +4,33 @@ import threading
 import os
 import logging
 import configparser
-
+from datetime import datetime
+from waitress import serve
 from subscribe import subscribe_channel, unsubscribe_channel
-from webhook_server import app, start_async_handler, set_uploader_log_handler
+from webhook_server import app, start_async_handler, set_uploader_log_handler, video_id_queue
 
 # ========== 配置区域 ==========
-
 CONFIG_FILE = "config/config.ini"
 CHANNELS_FILE = "config/channels.ini"
-SUBSCRIBED_FILE = os.path.join("utils", "subscribed_channels.json")  # 用于记录上次订阅的频道
-ERROR_LOG_FILE = "subscription_error.log"      # 失败报警日志文件
+SUBSCRIBED_FILE = os.path.join("utils", "subscribed_channels.json")
+ERROR_LOG_FILE = "subscription_error.log"
 NGROK_PATH = "ngrok.exe"
 NGROK_PORT = 8000
 CALLBACK_PATH = "/youtube/callback"
-
-# 你自己的 ngrok 域名（HTTP/TLS）
 NGROK_CUSTOM_DOMAIN = "miaoshahao.ngrok.app"
-
 # =============================
 
+def setup_logging():
+    """统一日志配置"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler("auto_ngrok_subscribe.log", encoding="utf-8")
+        ]
+    )
 
 def load_config():
     config = configparser.ConfigParser()
@@ -33,66 +41,52 @@ def load_config():
         cfg["ngrok_authtoken"] = config.get("global", "ngrok_authtoken", fallback=None)
     return cfg
 
-
 def load_channels():
     conf = configparser.ConfigParser(allow_no_value=True)
-    conf.optionxform = str  # 保持 key 的原始大小写
+    conf.optionxform = str
     conf.read(CHANNELS_FILE, encoding="utf-8")
     if "channels" in conf:
         return [k for k in conf["channels"].keys()]
     return []
-
 
 def ensure_ngrok_authtoken(authtoken):
     config_dir = os.path.expanduser("~/.ngrok2")
     config_file = os.path.join(config_dir, "ngrok.yml")
     if not os.path.exists(config_file) or authtoken not in open(config_file, encoding="utf-8").read():
         subprocess.run([NGROK_PATH, "config", "add-authtoken", authtoken])
-        print("[*] ngrok authtoken 已配置")
+        logging.info("ngrok authtoken 已配置")
     else:
-        print("[*] ngrok authtoken 已存在，无需重复配置")
-
+        logging.info("ngrok authtoken 已存在，无需重复配置")
 
 def start_ngrok():
-    """
-    使用自定义域名启动 ngrok，返回进程对象和公网地址。
-    """
-    print("[*] 正在启动 ngrok...")
-
+    logging.info("正在启动 ngrok...")
     ngrok_proc = subprocess.Popen(
         [NGROK_PATH, "http", "--domain", NGROK_CUSTOM_DOMAIN, str(NGROK_PORT)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT
     )
     public_url = f"https://{NGROK_CUSTOM_DOMAIN}"
-
-    print(f"[✓] 获取到 ngrok 地址: {public_url}")
+    logging.info(f"获取到 ngrok 地址: {public_url}")
     return ngrok_proc, public_url
 
-
 def check_ngrok_public_url():
-    """
-    固定自定义域名，始终返回 True。
-    """
     return True
-
 
 def health_check_ngrok(get_ngrok_proc, restart_callback, interval=60):
     while True:
         ngrok_proc = get_ngrok_proc()
         if ngrok_proc.poll() is not None:
-            print("[!] ngrok 进程已退出，重启中...")
+            logging.warning("ngrok 进程已退出，重启中...")
             restart_callback()
             time.sleep(3)
             continue
         if not check_ngrok_public_url():
-            print("[!] ngrok 公网地址不可用，重启中...")
+            logging.warning("ngrok 公网地址不可用，重启中...")
             ngrok_proc.terminate()
             restart_callback()
             time.sleep(3)
             continue
         time.sleep(interval)
-
 
 def load_previous_subscribed_channels():
     import json
@@ -101,12 +95,10 @@ def load_previous_subscribed_channels():
             return set(json.load(f))
     return set()
 
-
 def save_subscribed_channels(channel_id_set):
     import json
     with open(SUBSCRIBED_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(list(channel_id_set)), f, indent=2, ensure_ascii=False)
-
 
 def alarm_on_failure(action, channel_id, callback_url):
     msg = f"[ALERT] {action} 失败: channel_id={channel_id}, callback_url={callback_url}"
@@ -114,40 +106,46 @@ def alarm_on_failure(action, channel_id, callback_url):
     with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
-
 def sync_subscriptions(callback_url, channels):
     previous_channels = load_previous_subscribed_channels()
     current_channels = set(channels)
 
     for cid in current_channels - previous_channels:
         success, msg = subscribe_channel(cid, callback_url)
-        print(msg)
+        logging.info(msg)
         if not success:
             alarm_on_failure("订阅", cid, callback_url)
 
     for cid in previous_channels - current_channels:
         success, msg = unsubscribe_channel(cid, callback_url)
-        print(msg)
+        logging.info(msg)
         if not success:
             alarm_on_failure("取消订阅", cid, callback_url)
 
     save_subscribed_channels(current_channels)
 
+def print_startup_banner(public_url):
+    print("\n" + "="*60)
+    print("🎬 YouTube Shorts 自动转载系统")
+    print("="*60)
+    print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🌐 Webhook地址: {public_url}/youtube/callback")
+    print(f"📡 本地服务: http://127.0.0.1:{NGROK_PORT}")
+    print(f"🎯 状态: 等待YouTube推送通知...")
+    print("="*60)
+    print("💡 提示: 按 Ctrl+C 退出系统")
+    print("="*60 + "\n")
 
-def print_log(msg):
-    print(msg)
-
+def status_monitor(start_time):
+    while True:
+        time.sleep(300)  # 5分钟
+        uptime = int(time.time() - start_time)
+        h = uptime // 3600
+        m = (uptime % 3600) // 60
+        logging.info(f"💓 系统运行正常 - 运行时间: {h}小时{m}分钟")
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler("auto_ngrok_subscribe.log", encoding="utf-8")
-        ]
-    )
-
+    setup_logging()
     config = load_config()
     channels = load_channels()
 
@@ -156,9 +154,8 @@ def main():
 
     ngrok_proc, public_url = start_ngrok()
     callback_url = public_url + CALLBACK_PATH
-    print(f"[✓] 最终 Callback URL: {callback_url}")
+    logging.info("Webhook 服务器已启动")
 
-    # 闭包封装状态
     state = {"ngrok_proc": ngrok_proc, "public_url": public_url}
 
     def get_ngrok_proc():
@@ -168,27 +165,39 @@ def main():
         ngrok_proc, public_url = start_ngrok()
         state["ngrok_proc"] = ngrok_proc
         state["public_url"] = public_url
-        print(f"[✓] ngrok 已重启，新的 Callback URL: {public_url + CALLBACK_PATH}")
+        logging.info(f"ngrok 已重启，新的 Callback URL: {public_url + CALLBACK_PATH}")
 
-    # 启动健康检查线程
     threading.Thread(
         target=health_check_ngrok,
         args=(get_ngrok_proc, restart_ngrok, 60),
         daemon=True
     ).start()
 
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=NGROK_PORT, debug=False)
-    )
+    # --------- 日志顺序控制 ---------
+    waitress_started = threading.Event()
+    def start_waitress():
+        # 加一条和waitress原生输出内容一致的日志
+        logging.info(f"Serving on http://0.0.0.0:{NGROK_PORT}")
+        waitress_started.set()
+        serve(app, host="0.0.0.0", port=NGROK_PORT, threads=6)
+
+    flask_thread = threading.Thread(target=start_waitress)
     flask_thread.daemon = True
     flask_thread.start()
-    print("[*] Webhook 服务器已启动")
 
-    set_uploader_log_handler(print_log)
+    set_uploader_log_handler(lambda msg: logging.info(msg))
     async_thread = threading.Thread(target=start_async_handler)
     async_thread.daemon = True
     async_thread.start()
-    print("[*] 异步处理/上传线程已启动")
+    logging.info("异步处理/上传线程已启动")
+
+    # 等待waitress日志输出再打印横幅
+    waitress_started.wait()
+    print_startup_banner(public_url)
+
+    # 状态监控线程（防止睡眠）
+    start_time = time.time()
+    threading.Thread(target=status_monitor, args=(start_time,), daemon=True).start()
 
     sync_subscriptions(callback_url, channels)
 
@@ -198,7 +207,6 @@ def main():
     except KeyboardInterrupt:
         print("[✓] 程序被中断，关闭 ngrok...")
         state["ngrok_proc"].terminate()
-
 
 if __name__ == "__main__":
     main()
