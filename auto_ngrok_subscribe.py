@@ -13,11 +13,13 @@ from webhook_server import app, start_async_handler, set_uploader_log_handler, v
 CONFIG_FILE = "config/config.ini"
 CHANNELS_FILE = "config/channels.ini"
 SUBSCRIBED_FILE = os.path.join("utils", "subscribed_channels.json")
-ERROR_LOG_FILE = "subscription_error.log"
-NGROK_PATH = "ngrok.exe"
-NGROK_PORT = 8000
+ERROR_LOG_FILE = "log/subscription_error.log"
+FRPC_PATH = os.path.join("tools", "frpc.exe")  # Windows 下用 frpc.exe
+FRPC_INI = os.path.join("tools", "frpc.ini")   # 修改为 frpc.ini
+FRP_PORT = 8000   # 本地服务监听端口，和 frpc.ini 一致
 CALLBACK_PATH = "/youtube/callback"
-NGROK_CUSTOM_DOMAIN = "miaoshahao.ngrok.app"
+FRP_CUSTOM_DOMAIN = "frp.miaoshark.com"  # 你的穿透域名
+FRP_PUBLIC_PORT = 443  # 你公网访问的端口，nginx反代一般是443
 # =============================
 
 def setup_logging():
@@ -28,7 +30,7 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler("auto_ngrok_subscribe.log", encoding="utf-8")
+            logging.FileHandler("log/auto_frp_subscribe.log", encoding="utf-8", mode="w")
         ]
     )
 
@@ -38,7 +40,6 @@ def load_config():
     cfg = {}
     if "global" in config:
         cfg["youtube_api_key"] = config.get("global", "youtube_api_key", fallback="")
-        cfg["ngrok_authtoken"] = config.get("global", "ngrok_authtoken", fallback=None)
     return cfg
 
 def load_channels():
@@ -49,40 +50,24 @@ def load_channels():
         return [k for k in conf["channels"].keys()]
     return []
 
-def ensure_ngrok_authtoken(authtoken):
-    config_dir = os.path.expanduser("~/.ngrok2")
-    config_file = os.path.join(config_dir, "ngrok.yml")
-    if not os.path.exists(config_file) or authtoken not in open(config_file, encoding="utf-8").read():
-        subprocess.run([NGROK_PATH, "config", "add-authtoken", authtoken])
-        logging.info("ngrok authtoken 已配置")
-    else:
-        logging.info("ngrok authtoken 已存在，无需重复配置")
-
-def start_ngrok():
-    logging.info("正在启动 ngrok...")
-    ngrok_proc = subprocess.Popen(
-        [NGROK_PATH, "http", "--domain", NGROK_CUSTOM_DOMAIN, str(NGROK_PORT)],
+def start_frpc():
+    logging.info("正在启动 frpc...")
+    # 启动 frpc，配置文件为 tools/frpc.ini
+    frpc_proc = subprocess.Popen(
+        [FRPC_PATH, "-c", FRPC_INI],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT
     )
-    public_url = f"https://{NGROK_CUSTOM_DOMAIN}"
-    logging.info(f"获取到 ngrok 地址: {public_url}")
-    return ngrok_proc, public_url
+    # 这里假设你用 Nginx 反代后公网就是 https://frp.miaoshark.com
+    public_url = f"https://{FRP_CUSTOM_DOMAIN}"
+    logging.info(f"获取到 frp 公网地址: {public_url}")
+    return frpc_proc, public_url
 
-def check_ngrok_public_url():
-    return True
-
-def health_check_ngrok(get_ngrok_proc, restart_callback, interval=60):
+def health_check_frpc(get_frpc_proc, restart_callback, interval=60):
     while True:
-        ngrok_proc = get_ngrok_proc()
-        if ngrok_proc.poll() is not None:
-            logging.warning("ngrok 进程已退出，重启中...")
-            restart_callback()
-            time.sleep(3)
-            continue
-        if not check_ngrok_public_url():
-            logging.warning("ngrok 公网地址不可用，重启中...")
-            ngrok_proc.terminate()
+        frpc_proc = get_frpc_proc()
+        if frpc_proc.poll() is not None:
+            logging.warning("frpc 进程已退出，重启中...")
             restart_callback()
             time.sleep(3)
             continue
@@ -111,7 +96,6 @@ def sync_subscriptions(callback_url, channels):
     current_channels = set(channels)
     for cid in current_channels - previous_channels:
         success, msg = subscribe_channel(cid, callback_url)
-        # 只在这里输出日志，不在 subscribe.py 输出
         logging.info(msg)
         if not success:
             alarm_on_failure("订阅", cid, callback_url)
@@ -128,14 +112,14 @@ def print_startup_banner(public_url):
     print("="*60)
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Webhook地址: {public_url}/youtube/callback")
-    print(f"本地服务: http://127.0.0.1:{NGROK_PORT}")
+    print(f"本地端口: http://127.0.0.1:{FRP_PORT}")
     print("="*60)
-    print("温馨提示: 如要退出系统，请先按 Ctrl+C 关闭ngrok服务，再关闭（X）CMD控制台")
+    print("温馨提示: 如要退出系统，请先按 Ctrl+C 关闭 frpc 服务，再关闭CMD控制台窗口")
     print("="*60 + "\n")
 
 def status_monitor(start_time):
     while True:
-        time.sleep(300)  # 5分钟
+        time.sleep(600)  # 10分钟
         uptime = int(time.time() - start_time)
         h = uptime // 3600
         m = (uptime % 3600) // 60
@@ -158,37 +142,35 @@ def main():
     config = load_config()
     channels = load_channels()
 
-    authtoken = config.get("ngrok_authtoken", "")
-    ensure_ngrok_authtoken(authtoken)
-
-    ngrok_proc, public_url = start_ngrok()
+    # 启动 frpc
+    frpc_proc, public_url = start_frpc()
     callback_url = public_url + CALLBACK_PATH
     logging.info("Webhook 服务器已启动")
 
-    state = {"ngrok_proc": ngrok_proc, "public_url": public_url}
+    state = {"frpc_proc": frpc_proc, "public_url": public_url}
 
-    def get_ngrok_proc():
-        return state["ngrok_proc"]
+    def get_frpc_proc():
+        return state["frpc_proc"]
 
-    def restart_ngrok():
-        ngrok_proc, public_url = start_ngrok()
-        state["ngrok_proc"] = ngrok_proc
+    def restart_frpc():
+        frpc_proc, public_url = start_frpc()
+        state["frpc_proc"] = frpc_proc
         state["public_url"] = public_url
-        logging.info(f"ngrok 已重启，新的 Callback URL: {public_url + CALLBACK_PATH}")
+        logging.info(f"frpc 已重启，新的 Callback URL: {public_url + CALLBACK_PATH}")
 
+    # 健康检测线程，防止 frpc 异常退出
     threading.Thread(
-        target=health_check_ngrok,
-        args=(get_ngrok_proc, restart_ngrok, 60),
+        target=health_check_frpc,
+        args=(get_frpc_proc, restart_frpc, 60),
         daemon=True
     ).start()
 
-    # --------- 日志顺序控制 ---------
+    # --------- 启动本地 Web 服务 ---------
     waitress_started = threading.Event()
     def start_waitress():
-        # 加一条和waitress原生输出内容一致的日志
-        logging.info(f"Serving on http://0.0.0.0:{NGROK_PORT}")
+        logging.info(f"Serving on http://0.0.0.0:{FRP_PORT}")
         waitress_started.set()
-        serve(app, host="0.0.0.0", port=NGROK_PORT, threads=6)
+        serve(app, host="0.0.0.0", port=FRP_PORT, threads=6)
 
     flask_thread = threading.Thread(target=start_waitress)
     flask_thread.daemon = True
@@ -200,16 +182,18 @@ def main():
     async_thread.start()
     logging.info("异步处理/上传线程已启动")
 
-    # 等待waitress日志输出再打印横幅
     waitress_started.wait()
     print_startup_banner(public_url)
 
     # 新增：确保 webhook 服务 ready 再发起订阅
-    wait_webhook_ready(f"http://127.0.0.1:{NGROK_PORT}/youtube/callback")
+    wait_webhook_ready(f"http://127.0.0.1:{FRP_PORT}/healthz")
 
     # 状态监控线程（防止睡眠）
     start_time = time.time()
     threading.Thread(target=status_monitor, args=(start_time,), daemon=True).start()
+    
+    # 等待其他线程输出完初始化日志再执行订阅
+    time.sleep(3)
 
     sync_subscriptions(callback_url, channels)
 
@@ -217,8 +201,8 @@ def main():
         while True:
             time.sleep(10)
     except KeyboardInterrupt:
-        print("[✓] 程序被中断，关闭 ngrok...")
-        state["ngrok_proc"].terminate()
+        print("[✓] 程序被中断，关闭 frpc...")
+        state["frpc_proc"].terminate()
 
 if __name__ == "__main__":
     main()

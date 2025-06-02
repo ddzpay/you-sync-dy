@@ -31,6 +31,10 @@ async def get_video_id_async():
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, video_id_queue.get)
 
+@app.route("/healthz", methods=["GET"])
+def health_check():
+    return "OK", 200
+
 @app.route('/youtube/callback', methods=['GET', 'POST'])
 def youtube_callback():
     if request.method == 'GET':
@@ -77,7 +81,7 @@ async def handle_video(video_id):
         log_handler(f"[!] 获取视频信息失败: {video_id}")
         return
 
-    if not monitor.is_recent(info['published_at']):
+    if not monitor.is_recent(info['published_at'], minutes=2):
         log_handler(f"[-] 跳过：发布时间已超过2分钟，发布时间：{info['published_at']}")
         return
 
@@ -139,8 +143,7 @@ async def process_upload_task(task):
         monitor.record_video(channel_id, video_id)
         try:
             os.remove(path)
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            log_handler(f"[{now}] [✓] 上传成功，已删除本地文件: {path}")
+            log_handler(f"[✓] 上传成功，已删除本地文件: {path}")
         except Exception as e:
             log_handler(f"[!] 删除失败: {e}")
     else:

@@ -10,7 +10,7 @@ def unsubscribe_channel(channel_id: str, callback_url: str) -> tuple[bool, str]:
 
 def _submit_subscription(channel_id: str, callback_url: str, mode: str, retry: int = 3, delay: int = 3) -> tuple[bool, str]:
     hub_url = 'https://pubsubhubbub.appspot.com/subscribe'
-    topic = f'https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}'
+    topic = f'https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}'
     data = {
         'hub.mode': mode,
         'hub.topic': topic,
@@ -26,12 +26,12 @@ def _submit_subscription(channel_id: str, callback_url: str, mode: str, retry: i
                 return True, msg
             else:
                 msg = f"[!] {mode.upper()} 失败: {resp.status_code} - {resp.text}"
-                logging.warning(msg)
+                #logging.warning(msg)
         except requests.exceptions.RequestException as e:
             msg = f"[!] 网络异常 ({mode}, 尝试 {attempt+1}/{retry}): {e}"
-            logging.warning(msg)
+            #logging.warning(msg)
         if attempt < retry - 1:
             time.sleep(delay)
     msg = f"[!] {mode.upper()} 最终失败: {channel_id}"
-    logging.error(msg)
+    #logging.error(msg)
     return False, msg
