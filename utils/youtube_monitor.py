@@ -99,7 +99,7 @@ class YoutubeMonitor:
             logging.error(f"[!] 获取视频信息失败: {e}")
         return None
 
-    def is_recent(self, published_at, minutes=10):
+    def is_recent(self, published_at, minutes=2):
         try:
             published_time = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
