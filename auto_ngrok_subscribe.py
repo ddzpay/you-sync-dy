@@ -108,7 +108,7 @@ def sync_subscriptions(callback_url, channels):
 
 def print_startup_banner(public_url):
     print("\n" + "="*60)
-    print("you sync dy 自动转载系统")
+    print("YouTube同步抖音自动化系统")
     print("="*60)
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Webhook地址: {public_url}/youtube/callback")

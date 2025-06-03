@@ -85,7 +85,7 @@ async def handle_video(video_id):
         log_handler(f"[-] 跳过：发布时间已超过2分钟，发布时间：{info['published_at']}")
         return
 
-    if info['duration'] is None or info['duration'] > 60:
+    if info['duration'] is None or info['duration'] > 70:
         log_handler(f"[-] 跳过：非 Shorts 视频（时长 {info['duration']} 秒）")
         return
 
