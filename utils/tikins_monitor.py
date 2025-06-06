@@ -9,7 +9,7 @@ import asyncio
 
 from utils.video_downloader import VideoDownloader
 from utils.douyin_uploader import DouyinUploader
-from utils.video_history import VideoHistory  # 需实现 is_processed(video_id), mark_processed(video_id)
+from utils.video_history import VideoHistory  # 需实现 is_processed(platform, video_id), mark_processed(platform, video_id)
 
 def load_links_from_ini(path):
     config = configparser.ConfigParser()
@@ -120,9 +120,9 @@ def get_video_id_from_url(url):
         return m.group(1)
     return None
 
-async def process_and_upload(downloader, uploader, history, channel_id, video_url, video_id):
+async def process_and_upload(downloader, uploader, history, platform, video_url, video_id):
     downloaded_path = downloader.download_video(
-        channel_id=channel_id,
+        channel_id=platform,
         video_url=video_url,
         video_id=video_id
     )
@@ -134,11 +134,7 @@ async def process_and_upload(downloader, uploader, history, channel_id, video_ur
             logging.warning(f"[!] 上传失败: {e}")
             success = False
         if success:
-            history.mark_processed(video_id)
-            try:
-                os.remove(downloaded_path)
-            except Exception as e:
-                logging.warning(f"[!] 删除本地文件失败: {e}")
+            history.mark_processed(platform, video_id)
 
 def main():
     all_links = load_links_from_ini('config/channels.ini')
@@ -162,7 +158,7 @@ def main():
                 video_id = get_video_id_from_url(reel_url)
                 if not video_id:
                     continue
-                if history.is_processed(video_id):
+                if history.is_processed("instagram", video_id):
                     print(f"[✓] 已处理过: {video_id}")
                     continue
                 if check_instagram_reel_new(reel_url):
@@ -176,7 +172,7 @@ def main():
                 video_id = get_video_id_from_url(video_url)
                 if not video_id:
                     continue
-                if history.is_processed(video_id):
+                if history.is_processed("tiktok", video_id):
                     print(f"[✓] 已处理过: {video_id}")
                     continue
                 if check_tiktok_video_new(video_url):
