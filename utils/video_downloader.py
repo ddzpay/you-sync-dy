@@ -37,11 +37,9 @@ class VideoDownloader:
 
         cmd = [
             self.ytdlp_path,
-            "-f", "bestvideo*+bestaudio/best",
-            "--merge-output-format", "mp4",
+            "-f", "bestvideo[height<=1920]+bestaudio/best",
             "--no-playlist",
             "-o", output_path_template,
-            "--concurrent-fragments", "8",
             video_url
         ]
 

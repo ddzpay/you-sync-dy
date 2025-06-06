@@ -3,17 +3,36 @@ import pyautogui
 import json
 import asyncio
 import time
+import configparser
 from playwright.async_api import async_playwright, TimeoutError
 
 class DouyinUploader:
     def __init__(self, log_handler=None):
         self.playwright = None
-        self.browser = None  # 注意：这里是 persistent context 对象
+        self.browser = None  # persistent context
         self.page = None
         self.timeout = 60_000
         self.user_data_dir = 'user_data/douyin1'
         self._browser_lock = asyncio.Lock()
         self.log_handler = log_handler or (lambda msg: None)
+        # ========== 新增: 标签读取 ==========
+        self.tags = self.load_tags_from_config()
+        # ===================================
+
+    def load_tags_from_config(self):
+        """读取 config/channels.ini 中 [tags] 段的所有标签"""
+        tags = []
+        config_path = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "config", "channels.ini"
+        ))
+        config = configparser.ConfigParser(allow_no_value=True)
+        if os.path.exists(config_path):
+            config.read(config_path, encoding="utf-8")
+            if "tags" in config:
+                # tags = [v for k, v in config["tags"].items() if v.strip()]
+                # 保持标签顺序
+                tags = [k.strip() for k in config["tags"].keys() if k.strip()]
+        return tags
 
     def log(self, msg):
         if self.log_handler:
@@ -40,11 +59,13 @@ class DouyinUploader:
             viewport_height = int(screen_height / SCALE_FACTOR)
 
             self.playwright = await async_playwright().start()
+            chrome_path = "C:\Program Files\Google\Chrome\Application\chrome.exe"
             self.browser = await self.playwright.chromium.launch_persistent_context(
                 user_data_dir=self.user_data_dir,
                 headless=False,
                 viewport={'width': viewport_width, 'height': viewport_height},
                 device_scale_factor=SCALE_FACTOR,
+                executable_path=chrome_path,
                 args=[
                     "--start-maximized",
                     f"--force-device-scale-factor={SCALE_FACTOR}",
@@ -52,14 +73,10 @@ class DouyinUploader:
                     "--disable-blink-features=AutomationControlled"
                 ]
             )
-            
-            # 注入隐藏 webdriver 的脚本
             await self.browser.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             )
-
             self.page = self.browser.pages[0] if self.browser.pages else await self.browser.new_page()
-            
             await asyncio.sleep(1.5)
             pyautogui.hotkey('win', 'up')
             self.log("[✓] 浏览器已启动")
@@ -121,6 +138,29 @@ class DouyinUploader:
         except TimeoutError:
             self.log("[!] 登录超时，请检查网络或扫码是否成功")
 
+    # ========== 新增：自动填写标签 ==========
+    async def fill_tags(self):
+        if not self.tags:
+            self.log("[!] 未检测到任何标签，不自动填写标签")
+            return
+        # 定位标签输入框（即简介输入框）
+        # 你给的HTML结构：div[data-placeholder="添加作品简介"]
+        try:
+            # 先聚焦到简介输入框
+            tag_input_box = self.page.locator('div[data-placeholder="添加作品简介"]')
+            await tag_input_box.wait_for(timeout=10_000)
+            await tag_input_box.click()
+            await asyncio.sleep(1)
+            # Playwright 必须用 keyboard 输入
+            for tag in self.tags:
+                await self.page.keyboard.type(f'#{tag}')
+                await self.page.keyboard.press('Enter')
+                await asyncio.sleep(0.4)  # 每个标签输完稍等
+            self.log(f"[✓] 已自动填写标签：{' '.join('#'+t for t in self.tags)}")
+        except Exception as e:
+            self.log(f"[!] 自动填写标签时失败: {e}")
+    # ======================================
+
     async def upload_video(self, video_path, max_retry=3, retry_delay=2):
         attempt = 0
         while attempt < max_retry:
@@ -136,6 +176,10 @@ class DouyinUploader:
                 input_file = self.page.locator('input[type="file"]')
                 await input_file.set_input_files(video_path)
                 self.log("[✓] 视频文件已选择")
+                
+                 # ========== 新增：标签自动填写 ==========
+                await self.fill_tags()
+                # =====================================
 
                 preview_tab = self.page.locator('[class*="tabItem"]', has_text="预览视频")
                 try:
