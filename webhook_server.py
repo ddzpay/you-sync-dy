@@ -128,7 +128,7 @@ async def handle_video(task):
         if not monitor.is_recent(info['published_at'], minutes=2):
             log_handler(f"[-] 跳过：发布时间已超过2分钟，发布时间：{info['published_at']}")
             return
-        if info['duration'] is None or info['duration'] > 70:
+        if info['duration'] is None or info['duration'] > 120:
             log_handler(f"[-] 跳过：非 Shorts 视频（时长 {info['duration']} 秒）")
             return
 
