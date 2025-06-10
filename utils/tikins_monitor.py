@@ -1,53 +1,42 @@
 import requests
 from bs4 import BeautifulSoup
-import configparser
 import re
 from datetime import datetime, timezone
 import os
 import logging
 import asyncio
+import time
 
 from utils.video_downloader import VideoDownloader
 from utils.douyin_uploader import DouyinUploader
-from utils.video_history import VideoHistory  # 需实现 is_processed(video_id), mark_processed(video_id)
+from utils.video_history import VideoHistory  # 需实现 is_processed(platform, video_id), mark_processed(platform, video_id)
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
 def load_links_from_ini(path):
-    config = configparser.ConfigParser()
-    config.read(path, encoding='utf-8')
-    if 'links' in config:
-        return list(config['links'].values())
-    return []
+    links = []
+    in_links_section = False
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('['):
+                in_links_section = (line.lower() == '[links]')
+                continue
+            if in_links_section and line and not line.startswith(';') and not '=' in line:
+                if line.startswith('http'):
+                    links.append(line)
+    return links
 
 def is_tiktok(url):
     return 'tiktok.com' in url
-
-def is_instagram(url):
-    return 'instagram.com' in url
-
-def get_recent_instagram_reel_links(profile_url, max_count=4):
-    try:
-        resp = requests.get(profile_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[Instagram] Failed to fetch {profile_url}: {e}")
-        return []
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    links = []
-    for a in soup.find_all('a', href=True):
-        if '/reel/' in a['href']:
-            full_link = 'https://www.instagram.com' + a['href']
-            if full_link not in links:
-                links.append(full_link)
-            if len(links) >= max_count:
-                break
-    return links
 
 def get_recent_tiktok_video_links(profile_url, max_count=4):
     try:
         resp = requests.get(profile_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        print(f"[TikTok] Failed to fetch {profile_url}: {e}")
+        log(f"[TikTok] 获取 {profile_url} 失败: {e}")
         return []
     soup = BeautifulSoup(resp.text, 'html.parser')
     links = []
@@ -64,34 +53,12 @@ def get_recent_tiktok_video_links(profile_url, max_count=4):
                 break
     return links
 
-def check_instagram_reel_new(reel_url, threshold_seconds=120):
-    try:
-        resp = requests.get(reel_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[Instagram] Failed to fetch reel {reel_url}: {e}")
-        return False
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    time_tag = soup.find('time', attrs={'datetime': True})
-    if time_tag:
-        try:
-            publish_time = datetime.strptime(time_tag['datetime'], "%Y-%m-%dT%H:%M:%S.000Z").replace(tzinfo=timezone.utc)
-            now = datetime.utcnow().replace(tzinfo=timezone.utc)
-            diff = (now - publish_time).total_seconds()
-            return diff <= threshold_seconds
-        except Exception as e:
-            print(f"[Instagram] Failed to parse time for {reel_url}: {e}")
-            return False
-    else:
-        print(f"[Instagram] No <time> tag found in {reel_url}")
-    return False
-
 def check_tiktok_video_new(video_url, max_minutes=1):
     try:
         resp = requests.get(video_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        print(f"[TikTok] Failed to fetch video {video_url}: {e}")
+        log(f"[TikTok] 获取视频 {video_url} 失败: {e}")
         return False
     soup = BeautifulSoup(resp.text, 'html.parser')
     # 寻找类似“14 小时前”/“1分钟前”/“23秒前” 的span
@@ -106,23 +73,18 @@ def check_tiktok_video_new(video_url, max_minutes=1):
             minutes = int(m.group(1))
             return minutes <= max_minutes
     else:
-        print(f"[TikTok] No publish time span found in {video_url}")
+        log(f"[TikTok] {video_url} 未找到发布时间")
     return False
 
 def get_video_id_from_url(url):
-    # TikTok: https://www.tiktok.com/@user/video/7506491557038640406
     m = re.search(r'/video/(\d+)', url)
-    if m:
-        return m.group(1)
-    # Instagram: https://www.instagram.com/reel/DKZSBrMN51Z/
-    m = re.search(r'/reel/([\w-]+)/', url)
     if m:
         return m.group(1)
     return None
 
-async def process_and_upload(downloader, uploader, history, channel_id, video_url, video_id):
+async def process_and_upload(downloader, uploader, history, platform, video_url, video_id):
     downloaded_path = downloader.download_video(
-        channel_id=channel_id,
+        channel_id=platform,
         video_url=video_url,
         video_id=video_id
     )
@@ -131,61 +93,67 @@ async def process_and_upload(downloader, uploader, history, channel_id, video_ur
             await uploader.ensure_logged_in()
             success = await uploader.upload_video(downloaded_path)
         except Exception as e:
-            logging.warning(f"[!] 上传失败: {e}")
+            log(f"[!] 上传失败: {e}")
             success = False
         if success:
-            history.mark_processed(video_id)
-            try:
-                os.remove(downloaded_path)
-            except Exception as e:
-                logging.warning(f"[!] 删除本地文件失败: {e}")
+            history.mark_processed(platform, video_id)
 
-def main():
-    all_links = load_links_from_ini('config/channels.ini')
-    if not all_links:
-        print("No channel links found in config/channels.ini [links]")
-        return
-
-    logging.basicConfig(level=logging.INFO)
-    downloader = VideoDownloader()
-    uploader = DouyinUploader(log_handler=logging.info)
-    history = VideoHistory("utils/video_history.json")
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
+def check_tiktok_links(links, first_run=False):
+    loop = asyncio.get_event_loop()
     tasks = []
-    for link in all_links:
-        if is_instagram(link):
-            print(f"[Instagram] Checking {link}")
-            for reel_url in get_recent_instagram_reel_links(link):
-                video_id = get_video_id_from_url(reel_url)
-                if not video_id:
-                    continue
-                if history.is_processed(video_id):
-                    print(f"[✓] 已处理过: {video_id}")
-                    continue
-                if check_instagram_reel_new(reel_url):
-                    print(f"New Instagram reel: {reel_url}")
-                    tasks.append(
-                        process_and_upload(downloader, uploader, history, "instagram", reel_url, video_id)
-                    )
-        elif is_tiktok(link):
-            print(f"[TikTok] Checking {link}")
+    for link in links:
+        found_new = False
+        if is_tiktok(link):
+            if first_run:
+                log(f"[TikTok] 检查 {link}")
             for video_url in get_recent_tiktok_video_links(link):
                 video_id = get_video_id_from_url(video_url)
                 if not video_id:
                     continue
-                if history.is_processed(video_id):
-                    print(f"[✓] 已处理过: {video_id}")
+                if history.is_processed("tiktok", video_id):
+                    log(f"[✓] 已处理过: {video_id}")
                     continue
                 if check_tiktok_video_new(video_url):
-                    print(f"New TikTok video: {video_url}")
+                    log(f"[TikTok] 发现新视频: {video_url}")
                     tasks.append(
                         process_and_upload(downloader, uploader, history, "tiktok", video_url, video_id)
                     )
+                    found_new = True
+            if not found_new:
+                if first_run:
+                    log(f"[TikTok] 未发现新视频: {link}")
+        else:
+            if first_run:
+                log(f"[?] 不支持的链接: {link}")
     if tasks:
         loop.run_until_complete(asyncio.gather(*tasks))
+    else:
+        if first_run:
+            log("所有链接检查完成，没有需要上传的新视频。")
+
+def main():
+    links = load_links_from_ini('config/channels.ini')
+    if not links:
+        log("未在 config/channels.ini 的 [links] 中找到任何链接")
+        return
+
+    # 过滤出 TikTok 链接
+    tiktok_links = [link for link in links if is_tiktok(link)]
+    if not tiktok_links:
+        log("未找到任何 TikTok 链接")
+        return
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    global downloader, uploader, history
+    downloader = VideoDownloader()
+    uploader = DouyinUploader(log_handler=logging.info)
+    history = VideoHistory("utils/video_history.json")
+
+    first_run = True
+    while True:
+        check_tiktok_links(tiktok_links, first_run=first_run)
+        first_run = False
+        time.sleep(60)
 
 if __name__ == '__main__':
     main()

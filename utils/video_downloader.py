@@ -37,7 +37,8 @@ class VideoDownloader:
 
         cmd = [
             self.ytdlp_path,
-            "-S", "res:1920,fps,ext:mp4",
+            "-S", "res,codec,fps,ext",
+            "-f", "bestvideo+bestaudio",
             "--no-playlist",
             "-o", output_path_template,
             video_url
