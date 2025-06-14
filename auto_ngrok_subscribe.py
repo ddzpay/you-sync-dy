@@ -9,9 +9,6 @@ from waitress import serve
 from subscribe import subscribe_channel, unsubscribe_channel
 from webhook_server import app, start_async_handler, set_uploader_log_handler, video_id_queue
 
-# 新增导入
-from utils import tikins_monitor
-
 # ========== 配置区域 ==========
 CONFIG_FILE = "config/config.ini"
 CHANNELS_FILE = "config/channels.ini"
@@ -102,11 +99,13 @@ def sync_subscriptions(callback_url, channels):
         logging.info(msg)
         if not success:
             alarm_on_failure("订阅", cid, callback_url)
+        time.sleep(4)  # 每次订阅之间等待4秒，防止并发/速率限制
     for cid in previous_channels - current_channels:
         success, msg = unsubscribe_channel(cid, callback_url)
         logging.info(msg)
         if not success:
             alarm_on_failure("取消订阅", cid, callback_url)
+        time.sleep(4)  # 每次订阅之间等待4秒，防止并发/速率限制
     save_subscribed_channels(current_channels)
 
 def print_startup_banner(public_url):
@@ -122,7 +121,7 @@ def print_startup_banner(public_url):
 
 def status_monitor(start_time):
     while True:
-        time.sleep(3600)  # 1小时
+        time.sleep(600)  # 10分钟
         uptime = int(time.time() - start_time)
         h = uptime // 3600
         m = (uptime % 3600) // 60
@@ -139,26 +138,6 @@ def wait_webhook_ready(url, timeout=10):
             pass
         time.sleep(1)
     raise RuntimeError("Webhook 服务未准备好")
-
-# 仅 TikTok 轮询线程启动函数
-def start_tiktok_monitor(interval=60):
-    def monitor_loop():
-        import asyncio
-        asyncio.set_event_loop(asyncio.new_event_loop())  # 关键修正：为当前线程设置事件循环
-        while True:
-            links = tikins_monitor.load_links_from_ini('config/channels.ini')
-            # 只保留 TikTok 链接
-            tiktok_links = [link for link in links if tikins_monitor.is_tiktok(link)]
-            if not tiktok_links:
-                print("[轮询线程] 没有在 config/channels.ini 找到任何 TikTok 链接，监控线程自动退出。")
-                break  # 退出轮询线程
-            try:
-                tikins_monitor.check_tiktok_links(tiktok_links)  # 新增：只检查 tiktok
-            except Exception as e:
-                print(f"[轮询线程] 异常: {e}")
-            time.sleep(interval)
-    t = threading.Thread(target=monitor_loop, daemon=True)
-    t.start()
 
 def main():
     setup_logging()
@@ -210,9 +189,6 @@ def main():
 
     # 新增：确保 webhook 服务 ready 再发起订阅
     wait_webhook_ready(f"http://127.0.0.1:{FRP_PORT}/healthz")
-
-    # 启动 TikTok 监控线程（每60秒轮询一次，仅 TikTok）
-    start_tiktok_monitor(interval=60)
 
     # 状态监控线程（防止睡眠）
     start_time = time.time()

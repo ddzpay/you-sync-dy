@@ -14,10 +14,12 @@ from utils.video_history import VideoHistory  # 新增
 
 app = Flask(__name__)
 
-video_id_queue = queue.Queue()
+# 只允许同时缓存3个订阅推送待下载任务，超过丢弃
+MAX_DOWNLOAD_QUEUE_SIZE = 2
+video_id_queue = queue.Queue(maxsize=MAX_DOWNLOAD_QUEUE_SIZE)
 
 MAX_CONCURRENT_UPLOADS = 3
-UPLOAD_QUEUE_MAXSIZE = 5
+UPLOAD_QUEUE_MAXSIZE = 3
 upload_semaphore = None
 upload_queue = None
 
@@ -62,11 +64,14 @@ def youtube_callback():
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
                 if video_url:
                     logging.info(f"[✓] 收到新{platform}视频通知: {video_url}")
-                    video_id_queue.put({
-                        "platform": platform,
-                        "video_url": video_url,
-                        "video_id": video_id,
-                    })
+                    try:
+                        video_id_queue.put({
+                            "platform": platform,
+                            "video_url": video_url,
+                            "video_id": video_id,
+                        }, block=False)
+                    except queue.Full:
+                        logging.warning(f"[!] 下载队列已满（容量: {MAX_DOWNLOAD_QUEUE_SIZE}），丢弃本次推送: {video_url}")
             else:
                 # 兼容原有 YouTube XML
                 xml_data = request.data.decode("utf-8")
@@ -80,12 +85,16 @@ def youtube_callback():
                     video_id_elem = entry.find("yt:videoId", ns)
                     if video_id_elem is not None and video_id_elem.text:
                         video_id = video_id_elem.text
+                        video_url = f"https://www.youtube.com/watch?v={video_id}"
                         logging.info(f"[✓] 收到新YouTube视频通知: {video_id}")
-                        video_id_queue.put({
-                            "platform": "youtube",
-                            "video_url": f"https://www.youtube.com/watch?v={video_id}",
-                            "video_id": video_id
-                        })
+                        try:
+                            video_id_queue.put({
+                                "platform": "youtube",
+                                "video_url": video_url,
+                                "video_id": video_id
+                            }, block=False)
+                        except queue.Full:
+                            logging.warning(f"[!] 下载队列已满（容量: {MAX_DOWNLOAD_QUEUE_SIZE}），丢弃本次推送: {video_url}")
         except Exception as e:
             logging.error(f"解析 POST 回调出错: {e}")
         return Response("OK", status=200)
