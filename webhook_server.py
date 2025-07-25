@@ -25,6 +25,9 @@ upload_queue = None
 
 video_history = VideoHistory()  # 实例化全局唯一历史记录对象
 
+# 异步处理准备状态
+async_handler_ready = threading.Event()
+
 def init_async_globals():
     global upload_semaphore, upload_queue
     if upload_semaphore is None:
@@ -51,6 +54,10 @@ def youtube_callback():
             logging.warning("收到 YouTube 订阅验证 GET，但没有 challenge 参数")
             return Response("Missing challenge", status=400)
     elif request.method == 'POST':
+        # 确保异步处理程序已准备就绪
+        if not async_handler_ready.is_set():
+            logging.warning("异步处理程序尚未准备就绪，丢弃请求")
+            return Response("Service not ready", status=503)
         content_type = request.headers.get("Content-Type", "")
         try:
             # 新接口支持 JSON 提交
@@ -219,10 +226,14 @@ async def async_handler():
     await uploader.start_browser()
     await uploader.ensure_logged_in()
     start_upload_workers()
-    log_handler("[✓] 正在监控多平台视频推送... ")
+    
+    # 标记异步处理程序已准备就绪
+    async_handler_ready.set()
+    log_handler("[✓] 异步处理程序已准备就绪，正在监控多平台视频推送... ")
+    
     while True:
         task = await get_video_task_async()
         await handle_video(task)
 
 # 供主程序导入队列用
-__all__ = ['app', 'start_async_handler', 'set_uploader_log_handler', 'video_id_queue']
+__all__ = ['app', 'start_async_handler', 'set_uploader_log_handler', 'video_id_queue', 'async_handler_ready']

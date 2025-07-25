@@ -7,7 +7,7 @@ import configparser
 from datetime import datetime
 from waitress import serve
 from subscribe import subscribe_channel, unsubscribe_channel
-from webhook_server import app, start_async_handler, set_uploader_log_handler, video_id_queue
+from webhook_server import app, start_async_handler, set_uploader_log_handler, video_id_queue, async_handler_ready
 
 # ========== 配置区域 ==========
 CONFIG_FILE = "config/config.ini"
@@ -189,6 +189,14 @@ def main():
 
     # 新增：确保 webhook 服务 ready 再发起订阅
     wait_webhook_ready(f"http://127.0.0.1:{FRP_PORT}/healthz")
+    
+    # 等待异步处理程序准备就绪
+    logging.info("等待异步处理程序准备就绪...")
+    async_handler_ready.wait(timeout=60)  # 最多等待60秒
+    if not async_handler_ready.is_set():
+        logging.error("异步处理程序未能在60秒内准备就绪，继续执行但可能影响功能")
+    else:
+        logging.info("异步处理程序已准备就绪")
 
     # 状态监控线程（防止睡眠）
     start_time = time.time()
