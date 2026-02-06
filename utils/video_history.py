@@ -5,7 +5,7 @@ from threading import Lock
 class VideoHistory:
     def __init__(self, history_file=None):
         if history_file is None:
-            history_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'video_history.json'))
+            history_file = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'config', 'video_history.json'))
         self.history_file = history_file
         self.lock = Lock()
         self._data = self._load()

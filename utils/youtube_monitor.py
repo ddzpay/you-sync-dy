@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 
 class YoutubeMonitor:
     def __init__(self):
-        self.history_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'history.json'))
+        self.history_file = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'config', 'history.json'))
         hist_dir = os.path.dirname(self.history_file)
         if hist_dir and not os.path.exists(hist_dir):
             os.makedirs(hist_dir, exist_ok=True)
