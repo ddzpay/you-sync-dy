@@ -1,103 +1,226 @@
 import os
-import queue
-import threading
 import asyncio
 import logging
-from flask import Flask, request, Response
-import xml.etree.ElementTree as ET
-from datetime import datetime
+import atexit
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
+from contextlib import asynccontextmanager
+from asyncio import Lock
+import json
 
+from utils.browser_manager import BrowserManager
 from utils.youtube_monitor import YoutubeMonitor
-from utils.video_downloader import VideoDownloader
-from utils.douyin_uploader import DouyinUploader
-from utils.video_history import VideoHistory  # 新增
+from utils.video_history import VideoHistory
+from utils.video_downloader import AsyncVideoDownloader
+from utils.config_loader import get_time_gap, _set_main_thread_loop, config_reloader
 
-app = Flask(__name__)
+# 导入各平台上传脚本
+from utils.douyin_uploader import init_globals as douyin_init, get_queue as get_douyin_queue, worker as douyin_worker
+from utils.kuaishou_uploader import init_globals as kuaishou_init, get_queue as get_kuaishou_queue, worker as kuaishou_worker
 
-# 只允许同时缓存3个订阅推送待下载任务，超过丢弃
-MAX_DOWNLOAD_QUEUE_SIZE = 2
-video_id_queue = queue.Queue(maxsize=MAX_DOWNLOAD_QUEUE_SIZE)
+MAX_DOWNLOAD_QUEUE_SIZE = 4
+MAX_CONCURRENT_DOWNLOADS = 2
 
-MAX_CONCURRENT_UPLOADS = 3
-UPLOAD_QUEUE_MAXSIZE = 3
-upload_semaphore = None
-upload_queue = None
+video_id_queue = None
+download_semaphore = None
 
-video_history = VideoHistory()  # 实例化全局唯一历史记录对象
+LAST_TIME_FILE = os.path.join(os.path.dirname(__file__), "config", "last_processed_time.json")
+last_processed_time_per_channel = {}
+channel_time_lock = Lock()
 
-def init_async_globals():
-    global upload_semaphore, upload_queue
-    if upload_semaphore is None:
-        upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
-    if upload_queue is None:
-        upload_queue = asyncio.Queue(maxsize=UPLOAD_QUEUE_MAXSIZE)
+video_history = VideoHistory()
+youtube_monitor = YoutubeMonitor()
+log_handler = print
 
-async def get_video_task_async():
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, video_id_queue.get)
+browser_manager = None
 
-@app.route("/healthz", methods=["GET"])
-def health_check():
-    return "OK", 200
+#A端单个频道限流逻辑
+#当参数设置为-1时代表该频道不处理
 
-@app.route('/youtube/callback', methods=['GET', 'POST'])
-def youtube_callback():
-    if request.method == 'GET':
-        challenge = request.args.get("hub.challenge", "")
-        if challenge:
-            logging.info(f"收到 YouTube 订阅验证 GET，challenge={challenge}")
-            return Response(challenge, status=200)
+CUSTOM_CHANNEL_IDS = {
+    "UCzSFLbvTKdcfmCo7saWZujQ": 720, 
+    "UCIbPhiNMXmko9CTUaWX8gqQ": 720,
+    "UCleXpK9Sb2MCSZeNR4CTsMQ": 720,
+    "UCwavDe8g8Mfdk0o8QVJKaog": 720,
+    "UCjWCVEhAS4LCECSMDNMnzlw": 720,
+    "UCh9xEOEmXC_FuGUarv_2HUw": 720,
+    "UCUc0c5R90Evk4zNqxO6GzHA": -1, 
+    "UCZn8dbFxfy_iOWnWEHyFfdw": 720,
+    "UCurCrjSzGWfL2MMxkzVKAIw": -1, #抄袭4oA博主
+    "UCqaBbXWyJ3-kHBb2PdkUJRw": -1,
+    "UCwUq57PDCpsvwN5DYRig2-w": 720,
+    "UCJtVPEhP9ovaD0OkVi66B2A": 720,
+    "UCnWRXcywrripPvT9SGbztjg": -1,
+    "UCM7d5JKl2mPhZdwrpVG0hnQ": -1,
+    "UCCf51KVCmk-AGJY-XrCEkjw": -1,
+    "UCqcwDHhFk17OEHuvf16kY4A": -1, 
+    "UCO9RUgHoQ-bUpfFQopCFrxw": 720,
+    "UCSr575W5pK9NmHiZ69WFp4A": 720,
+    "UCVWG-brm2sO4CYuNlQg_4oA": -1,
+    "UCiNvbjFfN4lQTNJm6P-hfzA": 720,
+    "UC-maRiqJ9Y3mBZfBk-xnb8A": 720,
+    "UCqGRYxVOmDGCZPjMD-UBGlw": 720,
+
+}
+
+#上传抖音的频道
+#forward_to_douyin_channel_ids = set()
+forward_to_douyin_channel_ids  = {
+    "UCzSFLbvTKdcfmCo7saWZujQ", 
+    "UCIbPhiNMXmko9CTUaWX8gqQ",
+    "UCleXpK9Sb2MCSZeNR4CTsMQ",
+    "UCwavDe8g8Mfdk0o8QVJKaog",
+    "UCjWCVEhAS4LCECSMDNMnzlw",
+    "UCh9xEOEmXC_FuGUarv_2HUw",
+    "UCUc0c5R90Evk4zNqxO6GzHA", 
+    "UCZn8dbFxfy_iOWnWEHyFfdw",
+    "UCwUq57PDCpsvwN5DYRig2-w",
+    "UCJtVPEhP9ovaD0OkVi66B2A",
+    "UCqcwDHhFk17OEHuvf16kY4A", 
+    "UCO9RUgHoQ-bUpfFQopCFrxw",
+    "UCSr575W5pK9NmHiZ69WFp4A",
+    "UCVWG-brm2sO4CYuNlQg_4oA",
+    "UCiNvbjFfN4lQTNJm6P-hfzA",
+    "UC-maRiqJ9Y3mBZfBk-xnb8A",
+    "UCqGRYxVOmDGCZPjMD-UBGlw",
+    "youtube"
+}
+
+#forward_to_kuaishou_channel_ids = set()    #空集合
+#上传快手的频道
+forward_to_kuaishou_channel_ids = {
+    "UCzSFLbvTKdcfmCo7saWZujQ", 
+    "UCwavDe8g8Mfdk0o8QVJKaog",
+    "UCjWCVEhAS4LCECSMDNMnzlw",
+    "UCUc0c5R90Evk4zNqxO6GzHA", 
+    "UCZn8dbFxfy_iOWnWEHyFfdw",
+    "UCwUq57PDCpsvwN5DYRig2-w",
+    "UCJtVPEhP9ovaD0OkVi66B2A",
+    "UCqcwDHhFk17OEHuvf16kY4A", 
+    "UCO9RUgHoQ-bUpfFQopCFrxw",
+    "UCSr575W5pK9NmHiZ69WFp4A",
+    "UCVWG-brm2sO4CYuNlQg_4oA",
+    "UCiNvbjFfN4lQTNJm6P-hfzA",
+    "UC-maRiqJ9Y3mBZfBk-xnb8A",
+    "UCqGRYxVOmDGCZPjMD-UBGlw",
+    "youtube"
+}
+
+
+B_ENDPOINT = "https://dudu.frps.miaoshark.com/youtube/callback"
+
+def load_last_processed_time():
+    global last_processed_time_per_channel
+    try:
+        if os.path.exists(LAST_TIME_FILE):
+            with open(LAST_TIME_FILE, "r", encoding="utf-8") as f:
+                last_processed_time_per_channel = {}
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        record = json.loads(line)
+                        channel_id = record["channel_id"]
+                        dt_str = record["last_time"]
+                        last_processed_time_per_channel[channel_id] = datetime.fromisoformat(dt_str)
         else:
-            logging.warning("收到 YouTube 订阅验证 GET，但没有 challenge 参数")
-            return Response("Missing challenge", status=400)
-    elif request.method == 'POST':
-        content_type = request.headers.get("Content-Type", "")
-        try:
-            # 新接口支持 JSON 提交
-            if content_type.startswith("application/json"):
-                data = request.get_json(force=True)
-                platform = data.get("platform", "youtube")
-                video_url = data.get("url")
-                video_id = data.get("video_id")  # 如果有就直接用，没有可后面提取
-                # 兼容 YouTube 老格式
-                if not video_url and video_id and platform == "youtube":
-                    video_url = f"https://www.youtube.com/watch?v={video_id}"
-                if video_url:
-                    logging.info(f"[✓] 收到新{platform}视频通知: {video_url}")
-                    try:
-                        video_id_queue.put({
-                            "platform": platform,
-                            "video_url": video_url,
-                            "video_id": video_id,
-                        }, block=False)
-                    except queue.Full:
-                        logging.warning(f"[!] 下载队列已满（容量: {MAX_DOWNLOAD_QUEUE_SIZE}），丢弃本次推送: {video_url}")
-            else:
-                # 兼容原有 YouTube XML
-                xml_data = request.data.decode("utf-8")
-                root = ET.fromstring(xml_data)
-                ns = {
-                    'atom': 'http://www.w3.org/2005/Atom',
-                    'yt': 'http://www.youtube.com/xml/schemas/2015'
+            last_processed_time_per_channel = {}
+    except Exception as e:
+        logging.error(f"加载 last_processed_time.json 失败: {e}")
+        last_processed_time_per_channel = {}
+
+def save_last_processed_time():
+    try:
+        os.makedirs(os.path.dirname(LAST_TIME_FILE), exist_ok=True)
+        with open(LAST_TIME_FILE, "w", encoding="utf-8") as f:
+            for channel_id, dt in last_processed_time_per_channel.items():
+                record = {
+                    "channel_id": channel_id,
+                    "last_time": dt.isoformat()
                 }
-                entry = root.find("atom:entry", ns)
-                if entry is not None:
-                    video_id_elem = entry.find("yt:videoId", ns)
-                    if video_id_elem is not None and video_id_elem.text:
-                        video_id = video_id_elem.text
-                        video_url = f"https://www.youtube.com/watch?v={video_id}"
-                        logging.info(f"[✓] 收到新YouTube视频通知: {video_id}")
-                        try:
-                            video_id_queue.put({
-                                "platform": "youtube",
-                                "video_url": video_url,
-                                "video_id": video_id
-                            }, block=False)
-                        except queue.Full:
-                            logging.warning(f"[!] 下载队列已满（容量: {MAX_DOWNLOAD_QUEUE_SIZE}），丢弃本次推送: {video_url}")
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logging.error(f"保存 last_processed_time.json 失败: {e}")
+
+async def async_save_last_processed_time():
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, save_last_processed_time)
+    except Exception as e:
+        logging.error(f"异步保存 last_processed_time.json 失败: {e}")
+
+def cleanup_on_exit():
+    try:
+        save_last_processed_time()
+        logging.info("程序退出，已保存最后的时间记录")
+    except Exception as e:
+        logging.error(f"程序退出清理失败: {e}")
+
+atexit.register(cleanup_on_exit)
+load_last_processed_time()
+
+async def init_async_globals():
+    global download_semaphore, video_id_queue
+    douyin_init()
+    kuaishou_init()
+    if download_semaphore is None:
+        download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+    if video_id_queue is None:
+        video_id_queue = asyncio.Queue(maxsize=MAX_DOWNLOAD_QUEUE_SIZE)
+
+@asynccontextmanager
+async def lifespan(app):
+    global browser_manager
+    _set_main_thread_loop()
+    config_reloader.start_watching()
+    await init_async_globals()
+    browser_manager = BrowserManager(log_handler=log_handler)
+    await browser_manager.start()
+
+    # 启动各平台 worker
+    worker_tasks = [
+        asyncio.create_task(douyin_worker(browser_manager.uploader_douyin, log_handler), name=f"douyin_worker_{i}")
+        for i in range(2)
+    ] + [
+        asyncio.create_task(kuaishou_worker(browser_manager.uploader_kuaishou, log_handler), name=f"kuaishou_worker_{i}")
+        for i in range(2)
+    ]
+    main_task = asyncio.create_task(async_handler_task(), name="main_handler")
+    all_tasks = [main_task] + worker_tasks
+
+    log_handler("[✓] 系统初始化完成")
+    yield
+
+    log_handler("[✓] 开始优雅关闭后台任务...")
+    for t in all_tasks:
+        if not t.done():
+            t.cancel()
+    for t in all_tasks:
+        try:
+            await t
+        except asyncio.CancelledError:
+            log_handler(f"[✓] 任务 {t.get_name()} 已取消")
         except Exception as e:
-            logging.error(f"解析 POST 回调出错: {e}")
-        return Response("OK", status=200)
+            logging.error(f"关闭任务 {t.get_name()} 时出错: {e}")
+
+    try:
+        await browser_manager.stop()
+        log_handler("[✓] 浏览器及Playwright已关闭")
+    except Exception as e:
+        logging.error(f"关闭BrowserManager异常: {e}")
+
+    log_handler("[✓] 所有后台资源已释放，服务已安全退出。")
+
+app = FastAPI(lifespan=lifespan)
+
+def set_uploader_log_handler(handler):
+    global log_handler
+    log_handler = handler
+    # 让 browser_manager 的 uploader 也同步日志（如果已初始化）
+    if browser_manager and getattr(browser_manager, "uploader_douyin", None):
+        browser_manager.uploader_douyin.log_handler = handler
+    if browser_manager and getattr(browser_manager, "uploader_kuaishou", None):
+        browser_manager.uploader_kuaishou.log_handler = handler
 
 def extract_id_from_url(platform, url):
     import re
@@ -112,117 +235,261 @@ def extract_id_from_url(platform, url):
         return m.group(2) if m else url
     return url
 
+async def get_video_task_async():
+    return await video_id_queue.get()
+
+async def forward_xml_to_b_async(video_id, channel_id):
+    import aiohttp
+    xml_template = f"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+  <entry>
+    <yt:videoId>{video_id}</yt:videoId>
+    <yt:channelId>{channel_id}</yt:channelId>
+  </entry>
+</feed>"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                B_ENDPOINT,
+                data=xml_template.encode("utf-8"),
+                headers={"Content-Type": "application/atom+xml"},
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                logging.info(f"XML推送到B端(嘟嘟纪录片)，返回: {resp.status}")
+    except Exception as e:
+        logging.error(f"推送XML到B端(嘟嘟纪录片)失败: {e}")
+
+@app.get("/healthz")
+async def health_check():
+    return PlainTextResponse("OK", status_code=200)
+
+@app.api_route('/youtube/callback', methods=['GET', 'POST'])
+async def youtube_callback(request: Request):
+    global last_processed_time_per_channel
+    import xml.etree.ElementTree as ET
+    if request.method == 'GET':
+        params = dict(request.query_params)
+        challenge = params.get("hub.challenge", "")
+        if challenge:
+            logging.info(f"收到 YouTube 订阅验证 GET，challenge={challenge}")
+            return PlainTextResponse(challenge, status_code=200)
+        else:
+            logging.warning("收到 YouTube 订阅验证 GET，但没有 challenge 参数")
+            return PlainTextResponse("Missing challenge", status_code=400)
+
+    elif request.method == 'POST':
+        now = datetime.now()
+        content_type = request.headers.get("content-type", "")
+        try:
+            if content_type.startswith("application/json"):
+                data = await request.json()
+                platform = data.get("platform", "youtube")
+                video_url = data.get("url")
+                video_id = data.get("video_id")
+                channel_id = data.get("channel_id", platform)
+                local_path = data.get("local_path")  # 新增，没这个字段就是 None
+                if video_url or (platform.startswith("douyin") and local_path):  # 支持混剪场景
+                    logging.info(f"[✓] 收到新{platform}手动提交视频: {video_url or local_path}")
+                    try:
+                        await video_id_queue.put({
+                            "platform": platform,
+                            "video_url": video_url,
+                            "video_id": video_id,
+                            "channel_id": channel_id,
+                            "manual": True,   # 标记为手动提交
+                            "path": local_path
+                        })
+                    except asyncio.QueueFull:
+                        logging.warning(f"[!] 下载队列已满（容量: {MAX_DOWNLOAD_QUEUE_SIZE}），丢弃本次推送: {video_url or local_path}")
+
+            else:
+                xml_data = (await request.body()).decode("utf-8")
+                try:
+                    root = ET.fromstring(xml_data)
+                except ET.ParseError as e:
+                    logging.error(f"XML解析失败: {e}")
+                    return PlainTextResponse("Invalid XML", status_code=400)
+                ns = {
+                    'atom': 'http://www.w3.org/2005/Atom',
+                    'yt': 'http://www.youtube.com/xml/schemas/2015'
+                }
+                entry = root.find("atom:entry", ns)
+                if entry is not None:
+                    video_id_elem = entry.find("yt:videoId", ns)
+                    channel_id_elem = entry.find("yt:channelId", ns)
+                    if video_id_elem is not None and video_id_elem.text:
+                        video_id = video_id_elem.text
+                        channel_id = channel_id_elem.text if channel_id_elem is not None else "youtube"
+                        video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+                        #白名单单个频道ID限流逻辑
+                        is_disabled_channel = False
+                        should_process = True
+
+                        async with channel_time_lock:
+                            custom_time_gap_min = CUSTOM_CHANNEL_IDS.get(channel_id)
+                            if custom_time_gap_min is not None:
+                                if custom_time_gap_min == -1:   # 当设置为-1时代表该频道不处理
+                                    should_process = False
+                                    is_disabled_channel = True
+                                    logging.info(
+                                        f"[!] 频道 {channel_id} 已设置为永久禁用，本次新视频{video_id}不处理，推送给B端"
+                                    )
+                                elif custom_time_gap_min == 0:
+                                    last_processed_time_per_channel[channel_id] = now
+                                    should_process = True
+                                else:
+                                    current_time_gap = timedelta(minutes=custom_time_gap_min)
+                                    last_time = last_processed_time_per_channel.get(channel_id)
+                                    if last_time is None or now - last_time >= current_time_gap:
+                                        last_processed_time_per_channel[channel_id] = now
+                                        should_process = True
+                                    else:
+                                        should_process = False
+                            else:
+                                current_time_gap = await get_time_gap()
+                                last_time = last_processed_time_per_channel.get(channel_id)
+                                if last_time is None or now - last_time >= current_time_gap:
+                                    last_processed_time_per_channel[channel_id] = now
+                                    should_process = True
+                                else:
+                                    should_process = False
+
+                        if not should_process:
+                            if not is_disabled_channel:
+                                logging.info(
+                                    f"[!] 频道 {channel_id} {current_time_gap.total_seconds()//60:.0f}分钟内已推送过其它视频，本次新视频{video_id}不处理，推送给B端（嘟嘟纪录片）"
+                                )
+                            asyncio.create_task(forward_xml_to_b_async(video_id, channel_id))
+                            return PlainTextResponse("Channel limited, pushed to B", status_code=200)
+
+                        asyncio.create_task(async_save_last_processed_time())
+
+                        logging.info(f"[✓] 收到YouTube订阅视频通知: {video_id}")
+                        try:
+                            await video_id_queue.put({
+                                "platform": "youtube",
+                                "video_url": video_url,
+                                "video_id": video_id,
+                                "channel_id": channel_id
+                            })
+                        except asyncio.QueueFull:
+                            logging.warning(f"[!] 下载队列已满（容量: {MAX_DOWNLOAD_QUEUE_SIZE}），丢弃本次推送: {video_url}")
+
+        except Exception as e:
+            logging.error(f"解析 POST 回调出错: {e}")
+            logging.exception("详细错误信息")
+
+        return PlainTextResponse("OK", status_code=200)
+
+async def async_handler_task():
+    log_handler("[✓] 正在监控YouTube视频推送... ")
+    while True:
+        try:
+            task = await get_video_task_async()
+            asyncio.create_task(handle_video(task))
+        except Exception as e:
+            log_handler(f"[!] 异步处理任务异常: {e}")
+            logging.exception("异步处理任务异常")
+            await asyncio.sleep(5)
+
 async def handle_video(task):
-    platform = task.get("platform", "youtube")
-    video_url = task.get("video_url")
-    video_id = task.get("video_id") or extract_id_from_url(platform, video_url)
-    channel_id = platform
+    async with download_semaphore:
+        platform = task.get("platform", "youtube")
+        video_url = task.get("video_url")
+        video_id = task.get("video_id") or extract_id_from_url(platform, video_url)
+        channel_id = task.get("channel_id", platform)
+        manual = task.get("manual", False)
+        path = task.get("path")
 
-    # 全平台去重（上传成功前不处理）
-    if video_history.is_processed(platform, video_id):
-        log_handler(f"[-] {platform} 视频 {video_id} 已处理过，跳过。")
-        return
-
-    # YouTube 特有的发布时间和时长判断
-    if platform == "youtube":
-        monitor = YoutubeMonitor()
-        checked_videos = monitor.checked_videos
-        if video_id in checked_videos.values():
-            log_handler(f"[-] 视频 {video_id} 已处理过，跳过。")
-            return
-        info = await monitor.fetch_video_details(video_id)
-        if not info:
-            log_handler(f"[!] 获取视频信息失败: {video_id}")
-            return
-        if not monitor.is_recent(info['published_at'], minutes=2):
-            log_handler(f"[-] 跳过：发布时间已超过2分钟，发布时间：{info['published_at']}")
-            return
-        if info['duration'] is None or info['duration'] > 120:
-            log_handler(f"[-] 跳过：非 Shorts 视频（时长 {info['duration']} 秒）")
-            return
-
-    # 统一下载处理
-    downloader = VideoDownloader()
-    loop = asyncio.get_running_loop()
-    downloaded_path = await loop.run_in_executor(
-        None, downloader.download_video, channel_id, video_url, video_id
-    )
-
-    if downloaded_path:
-        try:
-            await upload_queue.put({
-                "video_id": video_id,
-                "channel_id": channel_id,
-                "path": downloaded_path,
-                "platform": platform
-            })
-        except asyncio.QueueFull:
-            log_handler(f"[!] 上传队列已满（容量: {UPLOAD_QUEUE_MAXSIZE}），丢弃本次任务: {downloaded_path}")
+        # ---- 优先处理本地混剪/人工任务（如 main.py 混剪上传、path 不为空） ----
+        if platform in ("douyin", "douyinmix") and manual and path:
             try:
-                os.remove(downloaded_path)
-                log_handler(f"[x] 上传队列溢出，已删除未入队本地文件: {downloaded_path}")
+                await get_douyin_queue().put({
+                    "video_id": video_id,
+                    "channel_id": channel_id,
+                    "path": path,
+                    "platform": "douyin"
+                })
+                log_handler(f"[✓] 混剪视频已直接入队抖音上传...")
+            except asyncio.QueueFull:
+                log_handler(f"[!] 抖音上传队列已满，丢弃本次任务: {path}")
+            return
+
+        # ---- 普通YouTube自动推送视频逻辑 ----
+        if platform == "youtube" and not manual:
+            checked_videos = youtube_monitor.checked_videos
+            if video_id in checked_videos.values():
+                log_handler(f"[-] 视频 {video_id} 已处理过，跳过。")
+                return
+            try:
+                info = await youtube_monitor.fetch_video_details(video_id)
+                if not info:
+                    log_handler(f"[!] 获取视频信息失败: {video_id}")
+                    return
+                if not youtube_monitor.is_recent(info['published_at'], minutes=2):
+                    log_handler(
+                        f"[-] 跳过：该作品发布时间已超过2分钟，发布于（北京时间）："
+                        f"{(datetime.strptime(info['published_at'], '%Y-%m-%dT%H:%M:%SZ') + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    return
+                if info['duration'] is None or info['duration'] > 120:
+                    log_handler(f"[-] 跳过：非 Shorts 视频（时长 {info['duration']} 秒）")
+                    return
             except Exception as e:
-                log_handler(f"[!] 删除本地文件失败: {e}")
-    else:
-        log_handler(f"[!] 视频下载失败: {video_url}")
+                log_handler(f"[!] 获取YouTube视频详情失败: {e}")
+                return
 
-uploader = DouyinUploader()
-log_handler = print
-
-def set_uploader_log_handler(handler):
-    global log_handler
-    log_handler = handler
-    uploader.log_handler = handler
-
-async def upload_worker():
-    while True:
         try:
-            task = await upload_queue.get()
-            async with upload_semaphore:
-                await process_upload_task(task)
-            upload_queue.task_done()
+            downloader = AsyncVideoDownloader()
+            downloaded_path = await downloader.download_video(channel_id, video_url, video_id)
         except Exception as e:
-            log_handler(f"[!] upload_worker异常: {e}")
-            logging.exception("upload_worker异常")
+            logging.info(f"[!] 调用 video_downloader.py 失败: {e}")
+            downloaded_path = None
 
-async def process_upload_task(task):
-    video_id = task['video_id']
-    channel_id = task['channel_id']
-    path = task['path']
-    platform = task.get('platform', 'youtube')
-    monitor = YoutubeMonitor()
-    success = await uploader.upload_video(path)
-    if success:
-        if platform == "youtube":
-            monitor.record_video(channel_id, video_id)
-        # 全平台: 上传成功后记录已处理
-        video_history.mark_processed(platform, video_id)
-        try:
-            os.remove(path)
-            log_handler(f"[✓] 上传成功，已删除本地文件: {path}")
-        except Exception as e:
-            log_handler(f"[!] 删除失败: {e}")
-    else:
-        log_handler(f"[!] 上传失败，保留文件: {path}")
+        if downloaded_path:
+            # 抖音分发
+            if channel_id in forward_to_douyin_channel_ids:
+                try:
+                    await get_douyin_queue().put({
+                        "video_id": video_id,
+                        "channel_id": channel_id,
+                        "path": downloaded_path,
+                        "platform": "douyin"
+                    })
+                except asyncio.QueueFull:
+                    log_handler(f"[!] 抖音上传队列已满，丢弃本次任务: {downloaded_path}")
+                    try:
+                        os.remove(downloaded_path)
+                        log_handler(f"[x] 抖音上传队列溢出，已删除未入队本地文件: {downloaded_path}")
+                    except Exception as e:
+                        log_handler(f"[!] 删除本地文件失败: {e}")
+            else:
+                log_handler(f"[✓] 频道 {channel_id} 不上传抖音")
 
-def start_upload_workers():
-    for _ in range(MAX_CONCURRENT_UPLOADS):
-        asyncio.create_task(upload_worker())
+            # 快手分发
+            if channel_id in forward_to_kuaishou_channel_ids:
+                try:
+                    await get_kuaishou_queue().put({
+                        "video_id": video_id,
+                        "channel_id": channel_id,
+                        "path": downloaded_path,
+                        "platform": "kuaishou"
+                    })
+                except asyncio.QueueFull:
+                    log_handler(f"[!] 快手上传队列已满，丢弃本次任务: {downloaded_path}")
+            else:
+                log_handler(f"[✓] 频道 {channel_id} 不上传快手")
+        else:
+            log_handler(f"[!] 视频下载失败: {video_url}")
 
-def start_async_handler():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(async_handler())
-
-async def async_handler():
-    init_async_globals()
-    await uploader.start_browser()
-    await uploader.ensure_logged_in()
-    start_upload_workers()
-    log_handler("[✓] 正在监控多平台视频推送... ")
-    while True:
-        task = await get_video_task_async()
-        await handle_video(task)
-
-# 供主程序导入队列用
-__all__ = ['app', 'start_async_handler', 'set_uploader_log_handler', 'video_id_queue']
+__all__ = [
+    'app',
+    'video_id_queue',
+    'init_async_globals',
+    'async_handler_task',
+    'get_video_task_async',
+    'handle_video',
+    'log_handler'
+]
